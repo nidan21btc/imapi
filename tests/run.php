@@ -46,6 +46,9 @@ check(sentFolder(['sent_folder' => 'Archiv'], $c) === 'Archiv', 'per-request sen
 check(sentFolder(['sent_folder' => null], $c) === null, 'null skips sent copy');
 check(sentFolder(['sent_folder' => ''], $c) === null, 'empty string skips sent copy');
 rejects(fn() => sentFolder(['sent_folder' => false], $c), 400);
+check(autoCreateSentFolder($c), 'configured Sent folder is prepared automatically');
+check(!autoCreateSentFolder(['create_sent_folder_if_missing' => false]), 'automatic Sent creation can be disabled');
+rejects(fn() => autoCreateSentFolder(['create_sent_folder_if_missing' => 'yes']), 503);
 
 $request = ['to' => ['to@example.com'], 'bcc' => ['hidden@example.com'], 'subject' => 'Grüße', 'text' => 'Hallo Welt',
     'html' => '<p>Hallo Welt</p>', 'in_reply_to' => '<original@example.com>',

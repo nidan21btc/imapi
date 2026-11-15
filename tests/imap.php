@@ -37,7 +37,7 @@ if ($pid === 0) {
             }
         } elseif (str_starts_with($command, 'CREATE ')) {
             $name = trim(substr($command, 7), '"');
-            if ($name !== 'Archiv.2026' && $name !== 'Gr&APwA3w-e') { exit(9); }
+            if (!in_array($name, ['Archiv.2026', 'Gr&APwA3w-e', 'Gesendet'], true)) { exit(9); }
             if (in_array($name, $createdFolders, true)) { exit(10); }
             $createdFolders[] = $name;
         } elseif (str_starts_with($command, 'SUBSCRIBE ')) { $subscriptions++; }
@@ -58,7 +58,7 @@ if ($pid === 0) {
         } elseif ($command === 'LOGOUT') {
             fwrite($peer, "* BYE closing\r\n$tag OK LOGOUT complete\r\n");
             fclose($peer); fclose($socket);
-            exit($peekReads === 2 && $seen && count($createdFolders) === 2 && $subscriptions === 4 ? 0 : 6);
+            exit($peekReads === 2 && $seen && count($createdFolders) === 3 && $subscriptions === 5 ? 0 : 6);
         } else { fwrite(STDERR, "Unexpected command in fixture: $command\n"); exit(7); }
         fwrite($peer, "$tag OK completed\r\n");
     }
@@ -88,6 +88,12 @@ try {
     foreach (['Archiv..2026', 'Archiv.2026/Mixed'] as $invalid) {
         try { createMailFolder($client, $invalid); throw new RuntimeException('Invalid separator accepted.'); }
         catch (ApiError $e) { if ($e->status !== 400) { throw $e; } }
+    }
+    $prepared = prepareSentFolder($client, 'Gesendet', ['sent_folder' => 'Gesendet', 'create_sent_folder_if_missing' => true]);
+    if (folderName($prepared) !== 'Gesendet') { throw new RuntimeException('Configured Sent folder not prepared.'); }
+    foreach ([['sent_folder' => 'Other'], ['sent_folder' => 'Missing', 'create_sent_folder_if_missing' => false]] as $c) {
+        try { prepareSentFolder($client, 'Missing', $c); throw new RuntimeException('Missing folder must stop send preparation.'); }
+        catch (ApiError $e) { if ($e->errorCode !== 'sent_folder_not_found') { throw $e; } }
     }
     $client->disconnect();
     pcntl_waitpid($pid, $status);

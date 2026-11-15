@@ -67,6 +67,17 @@ namespace {
                 throw new RuntimeException('Local-only transport lost TLS verification.');
             }
         }
+        $request = ['action' => 'send', 'to' => 'recipient@example.org', 'subject' => 'Fixture', 'text' => 'Fixture'];
+        try { dispatch($request, $c, 'fixture@sann.gmbh', 'fixture-only'); } catch (Throwable) { /* Preflight IMAP fails at probe. */ }
+        $afterPreflight = \ImapiTests\NetworkProbe::snapshot();
+        if (count($afterPreflight) !== 3 || $afterPreflight[2]['address'] !== 'ssl://127.0.0.1:993') {
+            throw new RuntimeException('Failed Sent preflight must not start SMTP.');
+        }
+        try { dispatch($request + ['sent_folder' => null], $c, 'fixture@sann.gmbh', 'fixture-only'); } catch (Throwable) { /* SMTP fails at probe. */ }
+        $afterSkip = \ImapiTests\NetworkProbe::snapshot();
+        if (count($afterSkip) !== 4 || $afterSkip[3]['address'] !== 'ssl://127.0.0.1:465') {
+            throw new RuntimeException('Explicit null Sent folder must skip IMAP entirely.');
+        }
         echo "Authentication gate passed: missing/invalid Bearer tokens cause zero socket calls; local-only pins IMAP/SMTP sockets and preserves TLS.\n";
     } finally {
         putenv($oldConfig === false ? 'IMAPI_CONFIG' : 'IMAPI_CONFIG=' . $oldConfig);

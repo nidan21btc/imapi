@@ -10,6 +10,7 @@ return [
     'smtp_port' => 465, // 465 = implicit TLS, 587 = required STARTTLS
     'allowed_mailboxes' => ['*@sann.gmbh'], // [] permits all accounts on this fixed server
     'sent_folder' => 'Sent', // Exact UTF-8 path; per-request sent_folder overrides this
+    'create_sent_folder_if_missing' => true, // Only configured sent_folder; prepare before SMTP
     'state_dir' => __DIR__ . '/rate-limit', // Private, writable by PHP; local filesystem
     'requests_per_minute' => 60,
     'failed_keys_before_block' => 5,

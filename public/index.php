@@ -88,8 +88,10 @@ function config(): array {
         || empty($c['state_dir']) || empty($c['mail_host']) || !in_array($c['smtp_port'] ?? 0, [465, 587], true)) {
         fail(503, 'configuration_error', 'Serverkonfiguration unvollständig.');
     }
-    $c += ['sent_folder' => 'Sent', 'allowed_mail_hosts' => ['cloud3-vm338.de-nserver.de'], 'local_only' => false];
+    $c += ['sent_folder' => 'Sent', 'create_sent_folder_if_missing' => true,
+        'allowed_mail_hosts' => ['cloud3-vm338.de-nserver.de'], 'local_only' => false];
     mailTransport($c);
+    autoCreateSentFolder($c);
     $root = realpath(__DIR__) . DIRECTORY_SEPARATOR;
     foreach ([$path, $c['state_dir']] as $private) {
         // State directory must already exist, so containment checks cannot be bypassed by '..'.
@@ -258,6 +260,26 @@ function sentFolder(array $p, array $c): ?string {
     if ($value === null || $value === '') { return null; }
     if (!is_string($value)) { fail(400, 'invalid_parameter', 'Ungültiger Parameter: sent_folder.'); }
     return validateFolderName($value);
+}
+/** @param array<string, mixed> $c */
+function autoCreateSentFolder(array $c): bool {
+    $value = $c['create_sent_folder_if_missing'] ?? true;
+    if (!is_bool($value)) { fail(503, 'configuration_error', 'create_sent_folder_if_missing muss ein boolescher Wert sein.'); }
+    return $value;
+}
+/** @param array<string, mixed> $c */
+function prepareSentFolder(Client $client, string $folder, array $c): Folder {
+    $existing = $client->getFolderByPath($folder);
+    if ($existing && !$existing->no_select) { return $existing; }
+    if (!$existing && autoCreateSentFolder($c) && $folder === ($c['sent_folder'] ?? 'Sent')) {
+        try {
+            $created = createMailFolder($client, $folder);
+            return getFolder($client, $created['folder']);
+        } catch (Throwable) {
+            fail(502, 'sent_folder_prepare_failed', 'Gesendet-Ordner konnte nicht vorbereitet werden; nichts versendet.');
+        }
+    }
+    fail(404, 'sent_folder_not_found', 'Gesendet-Ordner fehlt oder ist nicht auswählbar; nichts versendet.');
 }
 /**
  * @param callable(string, string): void $saveCopy
@@ -447,11 +469,20 @@ function dispatch(array $p, array $c, string $user, #[SensitiveParameter] string
     $mail = $action === 'send' ? buildMail($p, $c, $user, $password) : null;
     if ($mail !== null) {
         $sentFolder = sentFolder($p, $c);
-        return deliverMessage($mail, $sentFolder, static function (string $folder, string $mime) use ($c, $user, $password): void {
-            $client = connectMailbox($c, $user, $password);
-            try { getFolder($client, $folder)->appendMessage($mime, ['\\Seen']); }
-            finally { try { $client->disconnect(); } catch (Throwable) { /* Keep accepted SMTP result. */ } }
-        });
+        $client = null;
+        try {
+            $preparedFolder = null;
+            if ($sentFolder !== null) {
+                $client = connectMailbox($c, $user, $password);
+                $preparedFolder = prepareSentFolder($client, $sentFolder, $c);
+            }
+            return deliverMessage($mail, $sentFolder, static function (string $folder, string $mime) use ($preparedFolder): void {
+                if ($preparedFolder === null) { fail(503, 'configuration_error', 'Gesendet-Ordner nicht vorbereitet.'); }
+                $preparedFolder->appendMessage($mime, ['\\Seen']);
+            });
+        } finally {
+            if ($client !== null) { try { $client->disconnect(); } catch (Throwable) { /* Keep accepted SMTP result. */ } }
+        }
     }
     $client = connectMailbox($c, $user, $password);
     try {

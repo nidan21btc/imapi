@@ -21,7 +21,7 @@ Kleine HTTPS-Schnittstelle für IMAP und SMTP, PHP **8.2 oder neuer**. Ein öffe
 
 4. `mkdir -p private/rate-limit && cp config.example.php private/config.php`. Private Verzeichnisse mit `0700`, Config mit `0600` absichern, wenn PHP unter demselben Benutzer läuft. Bei separatem PHP-Benutzer gezielt Gruppenrechte vergeben: private Verzeichnisse `0750`, Config `0640`, das für PHP schreibbare Statusverzeichnis `0770`. Nur `rate-limit/` braucht Schreibrechte für den Webprozess. Keine `0777`-Rechte.
 5. `php bin/key.php /home/ACCOUNT/imapi/private/config.php` erzeugt einen zufälligen 256-Bit-Key, zeigt ihn einmal an und schreibt ausschließlich einen bcrypt-Hash atomar in die Config. Rotation erfolgt mit demselben Befehl; der alte Key wird sofort ungültig. Das Skript setzt die Config auf `0600`; bei separatem Web-Benutzer anschließend die passende Gruppe und `0640` erneut setzen.
-6. In der Config `allowed_mailboxes`, `sent_folder` und gegebenenfalls `smtp_port` anpassen. Der Zielhost kommt ausschließlich aus `mail_host` in der privaten Config und muss in `allowed_mail_hosts` stehen (exakte Hostnamen, keine Wildcards). Standard ist `cloud3-vm338.de-nserver.de`: IMAP 993 mit TLS; SMTP 465 mit TLS oder 587 mit verpflichtendem STARTTLS. Ein vom Client übergebener Host wird nicht verwendet. Zertifikatsprüfung bleibt eingeschaltet. Keine Mail-Passwörter eintragen. Den exakten UTF-8-Pfad des Gesendet-Ordners über `folders` ermitteln (z. B. `Gesendet`, `Sent` oder `INBOX.Sent`). Der konfigurierte Standard ist `Sent`; vorhandene individuelle Einstellungen bleiben bestehen. Fehlende Ordner werden ausschließlich durch den expliziten Befehl `create_folder` angelegt, niemals automatisch beim Senden, Lesen oder Verschieben.
+6. In der Config `allowed_mailboxes`, `sent_folder` und gegebenenfalls `smtp_port` anpassen. Der Zielhost kommt ausschließlich aus `mail_host` in der privaten Config und muss in `allowed_mail_hosts` stehen (exakte Hostnamen, keine Wildcards). Standard ist `cloud3-vm338.de-nserver.de`: IMAP 993 mit TLS; SMTP 465 mit TLS oder 587 mit verpflichtendem STARTTLS. Ein vom Client übergebener Host wird nicht verwendet. Zertifikatsprüfung bleibt eingeschaltet. Keine Mail-Passwörter eintragen. Den exakten UTF-8-Pfad des Gesendet-Ordners über `folders` ermitteln (z. B. `Gesendet`, `Sent` oder `INBOX.Sent`). Der konfigurierte Standard ist `Sent`; vorhandene individuelle Einstellungen bleiben bestehen. Mit `create_sent_folder_if_missing=true` (Standard) wird ausschließlich dieser konfigurierte Gesendet-Ordner vor dem SMTP-Versand bei Bedarf angelegt und abonniert. Schlägt die Vorbereitung fehl, wird nichts versendet. Bei `false` muss er bereits existieren. Andere Ordner werden nur explizit mit `create_folder` angelegt; Lesen und Verschieben legen niemals Ordner an.
 7. API-Domain mit gültigem TLS-Zertifikat auf `public/` richten. Bei unveränderlichem `public_html` nur `index.php` dorthin kopieren und dessen Autoloader-Pfad auf das private `vendor/autoload.php` ändern. `IMAPI_CONFIG` als serverseitige Umgebungsvariable auf den absoluten Config-Pfad setzen. Ohne diese Variable wird `../private/config.php` relativ zum Einstiegspunkt verwendet. Config, Composer-Dateien, Tests und `vendor/` niemals öffentlich bereitstellen.
 8. Authorization-Header an PHP weiterreichen, unter Apache etwa mit `CGIPassAuth On` im VHost/Directory oder, falls vom Hoster unterstützt, `.htaccess` mit `SetEnvIf Authorization "(.+)" HTTP_AUTHORIZATION=$1`. Requests dürfen im Webserver, Proxy, CDN, WAF oder APM **nicht mit Headern oder Body aufgezeichnet** werden. Normale Access-Logs ohne diese Daten sind möglich. Zugangsdaten gehören ausschließlich in Header, niemals in URL/Querystring. PHP unterdrückt rohe Bibliotheksfehler und Fehlerlogs für diesen Einstiegspunkt.
 
@@ -93,7 +93,7 @@ Diese Datei liegt nur vorübergehend **auf dem Client**, nicht auf dem API-Serve
 
    Erforderlich: `to`, `subject`, `text`. Adressfelder akzeptieren eine einzelne Mailadresse oder ein Array (je maximal 50), ohne Anzeigenamen. `cc`, `bcc`, `html`, `reply_to`, Thread-Header und Anhänge sind optional. `references` ist eine durch Leerzeichen getrennte Message-ID-Liste. Anhänge verwenden kanonisches Base64 ohne Zeilenumbrüche, maximal 20 Stück. Absender und Envelope-Sender sind stets der angemeldete Benutzer. Bcc-Adressen stehen nicht in den MIME-Headern.
 
-   SMTP wird zuerst ausgeführt. Erst nach bestätigter Annahme wird eine separate IMAP-Verbindung für die Ablage geöffnet. Ein nicht erreichbarer IMAP-Server oder ein fehlender Gesendet-Ordner verhindert den SMTP-Versand nicht. Nach SMTP-Annahme lautet die Antwort immer HTTP 200 mit `ok:true`, `sent:true`, der tatsächlichen `message_id` und `saved_to_sent:true|false`. Bei fehlgeschlagener Ablage kommen `sent_folder_error` (z. B. `Ordner nicht gefunden`) und aus Kompatibilitätsgründen `warning="sent_copy_failed"` hinzu. **Dann keinesfalls erneut senden.** Die API erstellt keine Ordner automatisch.
+   Vor dem SMTP-Versand wird der Gesendet-Ordner per IMAP geprüft. Fehlt der Ordner aus der privaten Config und ist `create_sent_folder_if_missing=true`, wird er angelegt und abonniert. Schlägt diese Vorbereitung fehl, startet SMTP nicht. Ein abweichender Ordner aus der Anfrage muss bereits existieren. Bei `create_sent_folder_if_missing=false` gilt das auch für den konfigurierten Ordner. Nach bestätigter SMTP-Annahme wird die Mail per IMAP-APPEND abgelegt. Nach SMTP-Annahme lautet die Antwort immer HTTP 200 mit `ok:true`, `sent:true`, der tatsächlichen `message_id` und `saved_to_sent:true|false`. Bei fehlgeschlagener Ablage kommen `sent_folder_error` (z. B. `Ordner nicht gefunden`) und aus Kompatibilitätsgründen `warning="sent_copy_failed"` hinzu. **Dann keinesfalls erneut senden.** Außer dem konfigurierten Gesendet-Ordner werden keine Ordner automatisch angelegt.
 
    Pro Anfrage überschreibt `sent_folder` die private Config. `null` oder `""` überspringen die Ablage vollständig: `saved_to_sent:false` ohne `sent_folder_error` oder `warning`, und ohne IMAP-Verbindung.
 
@@ -102,7 +102,7 @@ Diese Datei liegt nur vorübergehend **auf dem Client**, nicht auf dem API-Serve
    api '{"action":"send","to":"empfaenger@example.org","subject":"Ohne Ablage","text":"Hallo!","sent_folder":null}'
    ```
 
-   Beispiel bei fehlendem Ordner:
+   Beispiel, wenn die Ablage nach bestätigter SMTP-Annahme fehlschlägt (etwa weil der zuvor geprüfte Ordner zwischenzeitlich entfernt wurde):
 
    ```json
    {"ok":true,"data":{"sent":true,"message_id":"<id@example.org>","saved_to_sent":false,"sent_folder_error":"Ordner nicht gefunden","warning":"sent_copy_failed"}}
@@ -139,6 +139,7 @@ Diese Datei liegt nur vorübergehend **auf dem Client**, nicht auf dem API-Serve
 'allowed_mail_hosts' => ['cloud3-vm338.de-nserver.de', 'sann.cc', 'sann.gmbh', 'essenzenladen.de', 'ausflowers.de'],
 'mail_host' => 'cloud3-vm338.de-nserver.de',
 'local_only' => false,
+'create_sent_folder_if_missing' => true,
 ```
 
 Optional beschränkt **`local_only => true` ausschließlich ausgehende IMAP-/SMTP-Verbindungen** auf die feste IPv4-Loopback-Adresse `127.0.0.1`. Es gibt keinen DNS-Fallback auf andere Adressen. Host-Whitelist und feste Mailports gelten weiterhin. Der freigegebene `mail_host` bleibt der TLS-Peername und wird für SNI und die Zertifikatsprüfung verwendet; TLS wird auch lokal nicht abgeschaltet. Der Schalter setzt erreichbare Maildienste auf derselben Maschine voraus. Sind diese nicht verfügbar oder passt ihr Zertifikat nicht, scheitert die Verbindung geschlossen. Die eingehende HTTPS-Erreichbarkeit der API wird davon nicht verändert. Standard ist `false`.
@@ -156,14 +157,14 @@ Standard: 60 Anfragen je Minute/IP (gleitendes Fenster). Fünf falsche API-Keys 
 | 400 | Ungültiges JSON, Aktion oder Parameter |
 | 401 | API-Key fehlt oder ist falsch |
 | 403 | Mail-Anmeldung fehlgeschlagen oder Postfach nicht erlaubt |
-| 404 | Ordner, UID oder Anhang fehlt |
+| 404 | Ordner, UID oder Anhang fehlt; sent_folder_not_found vor SMTP verhindert den Versand |
 | 405 | Methode außer POST |
 | 409 | Sichere Verschiebung vom Mailserver nicht unterstützt |
 | 413 | Anfrage, Nachricht oder Liste zu groß |
 | 415 | Content-Type ist nicht application/json |
 | 426 | HTTPS erforderlich |
 | 429 | Rate-Limit oder temporäre IP-Sperre; Retry-After beachten |
-| 502 | Mailserver-/Transportfehler, u. a. smtp_failed, smtp_status_unknown, folder_create_failed, folder_subscribe_failed |
+| 502 | Mailserver-/Transportfehler, u. a. smtp_failed, smtp_status_unknown, folder_create_failed, folder_subscribe_failed, sent_folder_prepare_failed |
 | 503 | Config/Rate-Limit nicht verfügbar oder Mailhost nicht freigegeben |
 
 Standardgrößen: 20 MiB JSON-Anfrage, 12 MiB vollständige MIME-Nachricht, 32 MiB gelesene Nachrichten pro Liste. Webhosting-Limits (`memory_limit`, `post_max_size`, Webserver-Bodylimit) entsprechend einstellen, z. B. 256 MiB PHP-Speicher und 24 MiB `post_max_size`. Base64 und MIME-Decodierung benötigen zusätzlichen Speicher. Vorgeschaltete Serverlimits können eigene Fehlerseiten liefern, bevor PHP ausgeführt wird. Netzwerk-Timeout jeweils 20 Sekunden; Laufzeitlimit des Hosters beachten.
@@ -183,7 +184,7 @@ composer test     # Funktions-, Authentifizierungs-, IMAP- und SMTP-Tests; CLI p
 
 `composer check` führt Composer-Validierung, PHPStan und alle PHP-Tests zusammen aus; `composer test` nur die Tests. Die GitHub-Actions-CI führt die Analyse und Tests bei jedem Push und Pull Request unter PHP 8.2, 8.3, 8.4 und 8.5 aus. PHPStan ist ausschließlich eine Entwicklungsabhängigkeit und wird beim Produktionsdeployment mit `composer install --no-dev` nicht installiert. Die Analyse verwendet keine Baseline und keine unterdrückten Fehler. Der lokale Analysecache wird nicht versioniert.
 
-Die Tests prüfen MIME/UTF-8, Anhänge, Bcc, Thread-Header, Eingabevalidierung, Größenlimit, Postfach-Whitelist und Rate-Limit/IP-Sperre. Der Authentifizierungstest fängt die Socket-Funktionen beider Bibliotheken ab und weist null Verbindungsversuche bei fehlenden/falschen Tokens nach; außerdem prüft er Loopback-Pinning mit unveränderter TLS-Prüfung. Die IMAP-/SMTP-Protokolltests verwenden ausschließlich lokale Testserver. Sie prüfen PEEK, explizites Markieren, CREATE/SUBSCRIBE mit vorhandenen und neuen Ordnern, Zeichensatz/Trennzeichen sowie SMTP-Annahme trotz fehlender Ablage, übersprungene Ablage, Ablehnung, teilweise Empfängerannahme und verlorene Bestätigung. Optional prüft `IMAPI_TEST_KEY=… python3 tests/gateway.py` die laufende lokale HTTPS-API ohne echte Postfachzugänge; den Key dabei über eine geschützte Shellvariable setzen. Für den echten Postfach-Smoke-Test die obigen Aufrufe mit einem Testpostfach ausführen; dafür werden keine Zugangsdaten im Projekt hinterlegt.
+Die Tests prüfen MIME/UTF-8, Anhänge, Bcc, Thread-Header, Eingabevalidierung, Größenlimit, Postfach-Whitelist und Rate-Limit/IP-Sperre. Der Authentifizierungstest fängt die Socket-Funktionen beider Bibliotheken ab und weist null Verbindungsversuche bei fehlenden/falschen Tokens nach; außerdem prüft er Loopback-Pinning mit unveränderter TLS-Prüfung. Die IMAP-/SMTP-Protokolltests verwenden ausschließlich lokale Testserver. Sie prüfen PEEK, explizites Markieren, CREATE/SUBSCRIBE mit vorhandenen und neuen Ordnern, Zeichensatz/Trennzeichen sowie Vorbereitung des konfigurierten Gesendet-Ordners vor SMTP, Versandabbruch bei fehlgeschlagener Vorbereitung, SMTP-Annahme trotz später fehlgeschlagener Ablage, übersprungene Ablage, Ablehnung, teilweise Empfängerannahme und verlorene Bestätigung. Optional prüft `IMAPI_TEST_KEY=… python3 tests/gateway.py` die laufende lokale HTTPS-API ohne echte Postfachzugänge; den Key dabei über eine geschützte Shellvariable setzen. Für den echten Postfach-Smoke-Test die obigen Aufrufe mit einem Testpostfach ausführen; dafür werden keine Zugangsdaten im Projekt hinterlegt.
 
 Öffentliches Repository vorbereiten: ausschließlich versionierte Dateien hochladen, niemals `private/`, `.dev/`, Header-Dateien oder Maildaten. GitHub CLI nach Anmeldung etwa: `gh repo create imapi --public --source=. --remote=origin --push`. Die Lizenz ist MIT; siehe `LICENSE`.
 
