@@ -1,0 +1,27 @@
+{
+    "name": "sann/imapi",
+    "description": "Small HTTPS IMAP/SMTP API without stored mailbox credentials",
+    "type": "project",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Carsten Sann",
+            "email": "carsten@sann.cc"
+        }
+    ],
+    "require": {
+        "phpmailer/phpmailer": "^7.2",
+        "webklex/php-imap": "^6.2",
+        "php": ">=8.2",
+        "ext-mbstring": "*",
+        "ext-openssl": "*",
+        "ext-iconv": "*",
+        "ext-dom": "*",
+        "ext-fileinfo": "*"
+    },
+    "config": {
+        "platform": {
+            "php": "8.2.0"
+        }
+    }
+}

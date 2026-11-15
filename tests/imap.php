@@ -1,0 +1,76 @@
+<?php
+// Local protocol fixture only; never connects to a real mailbox or sends mail.
+declare(strict_types=1);
+define('IMAPI_TEST', true);
+require __DIR__ . '/../public/index.php';
+ini_set('display_errors', '1');
+if (!function_exists('pcntl_fork')) { fwrite(STDERR, "IMAP fixture requires CLI pcntl.\n"); exit(1); }
+
+$headers = "Date: Sun, 15 Nov 2026 12:00:00 +0100\r\nFrom: Sender <sender@example.org>\r\nTo: user@sann.gmbh\r\nSubject: =?ISO-8859-1?Q?Gr=FC=DFe?=\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=ISO-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n";
+$body = 'Gr=FC=DFe aus dem Test';
+$size = strlen($headers . $body);
+$socket = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+if (!$socket) { throw new RuntimeException('Could not create fixture socket.'); }
+$port = (int)substr(strrchr(stream_socket_get_name($socket, false), ':'), 1);
+$pid = pcntl_fork();
+if ($pid === -1) { throw new RuntimeException('Could not fork fixture.'); }
+if ($pid === 0) {
+    $peer = stream_socket_accept($socket, 10);
+    if (!$peer) { exit(2); }
+    stream_set_timeout($peer, 10);
+    fwrite($peer, "* OK fixture ready\r\n");
+    $seen = false;
+    $peekReads = 0;
+    while (($line = fgets($peer)) !== false) {
+        if (!preg_match('/^(\S+) (.+)\r\n$/', $line, $match)) { exit(3); }
+        [$unused, $tag, $command] = $match;
+        if (str_starts_with($command, 'CAPABILITY')) { fwrite($peer, "* CAPABILITY IMAP4rev1 MOVE UIDPLUS\r\n"); }
+        elseif (str_starts_with($command, 'LOGIN ')) { /* Only synthetic credentials. */ }
+        elseif ($command === 'NOOP') { /* Connection health check. */ }
+        elseif (str_starts_with($command, 'SELECT ')) {
+            fwrite($peer, "* FLAGS (\\Seen \\Flagged)\r\n* 1 EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 1]\r\n* OK [UIDNEXT 43]\r\n");
+        } elseif (str_starts_with($command, 'UID FETCH ')) {
+            if (str_contains($command, 'RFC822.SIZE')) { fwrite($peer, "* 1 FETCH (UID 42 RFC822.SIZE $size)\r\n"); }
+            elseif (str_contains($command, 'RFC822.HEADER')) { fwrite($peer, '* 1 FETCH (UID 42 RFC822.HEADER {' . strlen($headers) . "}\r\n" . $headers . ")\r\n"); }
+            elseif (str_contains($command, 'BODY.PEEK[TEXT]')) {
+                $peekReads++;
+                fwrite($peer, '* 1 FETCH (UID 42 BODY[TEXT] {' . strlen($body) . "}\r\n" . $body . ")\r\n");
+            } elseif (str_contains($command, 'FLAGS')) { fwrite($peer, '* 1 FETCH (UID 42 FLAGS (' . ($seen ? '\\Seen' : '') . "))\r\n"); }
+            else { fwrite(STDERR, "Unexpected fetch in fixture.\n"); exit(4); }
+        } elseif (str_starts_with($command, 'UID STORE ')) {
+            // One explicit marking is allowed only after both PEEK reads.
+            if ($peekReads !== 2 || $seen || !str_contains($command, '+FLAGS') || !str_contains($command, '\\Seen')) { exit(5); }
+            $seen = true;
+        } elseif ($command === 'LOGOUT') {
+            fwrite($peer, "* BYE closing\r\n$tag OK LOGOUT complete\r\n");
+            fclose($peer); fclose($socket);
+            exit($peekReads === 2 && $seen ? 0 : 6);
+        } else { fwrite(STDERR, "Unexpected command in fixture: $command\n"); exit(7); }
+        fwrite($peer, "$tag OK completed\r\n");
+    }
+    exit(8);
+}
+fclose($socket);
+$client = (new \Webklex\PHPIMAP\ClientManager(imapOptions()))->make([
+    'host' => '127.0.0.1', 'port' => $port, 'encryption' => false, 'protocol' => 'imap',
+    'username' => 'fixture@example.org', 'password' => 'fixture-only', 'timeout' => 5,
+]);
+try {
+    $client->connect();
+    $folder = new \Webklex\PHPIMAP\Folder($client, 'INBOX', '/', []);
+    $m = loadMessage($client, $folder, 42, 1024 * 1024, true);
+    if ($m->hasFlag('Seen') || summary($m)['subject'] !== 'Grüße' || $m->getTextBody() !== 'Grüße aus dem Test') {
+        throw new RuntimeException('PEEK / ISO-8859-1 decoding failed.');
+    }
+    $m = loadMessage($client, $folder, 42, 1024 * 1024, true);
+    if ($m->hasFlag('Seen')) { throw new RuntimeException('Reading changed Seen flag.'); }
+    if (!$m->setFlag('Seen')) { throw new RuntimeException('Explicit mark_seen failed.'); }
+    $client->disconnect();
+    pcntl_waitpid($pid, $status);
+    if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) { throw new RuntimeException('Unexpected protocol operation.'); }
+    echo "IMAP wire fixture passed: PEEK, UTF-8, explicit Seen, no implicit flag writes.\n";
+} catch (Throwable $e) {
+    posix_kill($pid, SIGTERM);
+    pcntl_waitpid($pid, $status);
+    throw $e;
+}

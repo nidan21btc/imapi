@@ -1,0 +1,6 @@
+/vendor/
+/private/
+/.dev/
+/.env
+*.log
+__pycache__/

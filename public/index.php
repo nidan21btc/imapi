@@ -1,0 +1,383 @@
+<?php
+declare(strict_types=1);
+
+use PHPMailer\PHPMailer\PHPMailer;
+use Webklex\PHPIMAP\Client;
+use Webklex\PHPIMAP\ClientManager;
+use Webklex\PHPIMAP\Folder;
+use Webklex\PHPIMAP\Message;
+
+// Never emit library exceptions, arguments, protocol traces or credentials.
+ini_set('display_errors', '0');
+ini_set('log_errors', '0');
+ini_set('zend.exception_ignore_args', '1');
+require __DIR__ . '/../vendor/autoload.php';
+
+final class ApiError extends RuntimeException {
+    public function __construct(public int $status, public string $errorCode, string $message) {
+        parent::__construct($message);
+    }
+}
+
+function fail(int $status, string $code, string $message): never { throw new ApiError($status, $code, $message); }
+function respond(int $status, array $data): void {
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    header('X-Content-Type-Options: nosniff');
+    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR);
+}
+function strparam(array $p, string $key, ?string $default = null, int $max = 1024): string {
+    $value = $p[$key] ?? $default;
+    if (!is_string($value) || strlen($value) > $max || str_contains($value, "\0")) {
+        fail(400, 'invalid_parameter', "Ungültiger Parameter: $key.");
+    }
+    return $value;
+}
+function lineparam(array $p, string $key, ?string $default = null, int $max = 1024): string {
+    $v = strparam($p, $key, $default, $max);
+    if (preg_match('/[\x00-\x1f\x7f]/', $v)) { fail(400, 'invalid_parameter', "Ungültiger Parameter: $key."); }
+    return $v;
+}
+function boolparam(array $p, string $key, bool $default = false): bool {
+    if (array_key_exists($key, $p) && !is_bool($p[$key])) { fail(400, 'invalid_parameter', "Ungültiger Parameter: $key."); }
+    return $p[$key] ?? $default;
+}
+function intparam(array $p, string $key, int $min, int $max, ?int $default = null): int {
+    $v = $p[$key] ?? $default;
+    if (!is_int($v) || $v < $min || $v > $max) { fail(400, 'invalid_parameter', "Ungültiger Parameter: $key."); }
+    return $v;
+}
+function allowedMailbox(string $user, array $patterns): bool {
+    if (!filter_var($user, FILTER_VALIDATE_EMAIL)) { return false; }
+    if (!$patterns) { return true; }
+    foreach ($patterns as $pattern) {
+        if (str_starts_with($pattern, '*@')) {
+            if (strcasecmp(substr($user, strrpos($user, '@') + 1), substr($pattern, 2)) === 0) { return true; }
+        } elseif (strcasecmp($user, $pattern) === 0) { return true; }
+    }
+    return false;
+}
+function config(): array {
+    $path = getenv('IMAPI_CONFIG') ?: __DIR__ . '/../private/config.php';
+    $c = is_file($path) ? require $path : null;
+    if (!is_array($c) || empty($c['api_key_hash']) || !password_get_info($c['api_key_hash'])['algo']
+        || empty($c['state_dir']) || empty($c['mail_host']) || !in_array($c['smtp_port'] ?? 0, [465, 587], true)) {
+        fail(503, 'configuration_error', 'Serverkonfiguration unvollständig.');
+    }
+    $root = realpath(__DIR__) . DIRECTORY_SEPARATOR;
+    foreach ([$path, $c['state_dir']] as $private) {
+        // State directory must already exist, so containment checks cannot be bypassed by '..'.
+        $real = realpath($private);
+        if (!$real || $real === rtrim($root, DIRECTORY_SEPARATOR) || str_starts_with($real, $root)) {
+            fail(503, 'configuration_error', 'Config und Statusverzeichnis müssen außerhalb des Webroots liegen.');
+        }
+    }
+    return $c;
+}
+function authenticate(array $c, array $server): void {
+    $now = time();
+    $path = $c['state_dir'] . '/' . hash('sha256', $server['REMOTE_ADDR'] ?? 'unknown') . '.json';
+    $f = @fopen($path, 'c+');
+    if (!$f || !flock($f, LOCK_EX)) { fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.'); }
+    try {
+        $raw = stream_get_contents($f);
+        $state = $raw === '' ? [] : json_decode($raw, true, 16, JSON_THROW_ON_ERROR);
+        $requests = array_values(array_filter($state['requests'] ?? [], fn($t) => $t > $now - 60));
+        $failures = array_values(array_filter($state['failures'] ?? [], fn($t) => $t > $now - 900));
+        $blocked = $state['blocked'] ?? 0;
+        if ($blocked > $now || count($requests) >= $c['requests_per_minute']) {
+            header('Retry-After: ' . max(1, $blocked > $now ? $blocked - $now : $requests[0] + 60 - $now));
+            fail(429, 'rate_limited', 'Zu viele Anfragen. Bitte später erneut versuchen.');
+        }
+        $requests[] = $now;
+        $auth = $server['HTTP_AUTHORIZATION'] ?? '';
+        $key = preg_match('/^Bearer ([A-Za-z0-9_-]{32,256})$/D', $auth, $m) ? $m[1] : '';
+        $valid = password_verify($key, $c['api_key_hash']);
+        if (!$valid) {
+            $failures[] = $now;
+            if (count($failures) >= $c['failed_keys_before_block']) {
+                $blocked = $now + $c['block_seconds'];
+                $failures = [];
+            }
+        }
+        $json = json_encode(['requests' => $requests, 'failures' => $failures, 'blocked' => $blocked], JSON_THROW_ON_ERROR);
+        rewind($f);
+        if (!ftruncate($f, 0) || fwrite($f, $json) !== strlen($json) || !fflush($f)) {
+            fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.');
+        }
+        if (!$valid) { header('WWW-Authenticate: Bearer'); fail(401, 'unauthorized', 'Ungültiger API-Key.'); }
+    } finally { flock($f, LOCK_UN); fclose($f); }
+    // Bounded opportunistic cleanup; only limiter-owned files, never request data.
+    if (random_int(1, 100) === 1) {
+        $checked = 0;
+        foreach (new DirectoryIterator($c['state_dir']) as $entry) {
+            if (++$checked > 1000) { break; }
+            if ($entry->isFile() && preg_match('/^[a-f0-9]{64}\.json$/D', $entry->getFilename())
+                && $entry->getMTime() < $now - max(3600, $c['block_seconds'] + 900)) { @unlink($entry->getPathname()); }
+        }
+    }
+}
+function imapOptions(): array {
+    return ['options' => ['debug' => false, 'fetch' => \Webklex\PHPIMAP\IMAP::FT_PEEK,
+        'fetch_body' => false, 'soft_fail' => false],
+        'decoding' => ['options' => ['header' => 'iconv']]];
+}
+function connectMailbox(array $c, string $user, #[SensitiveParameter] string $password): Client {
+    $client = (new ClientManager(imapOptions()))->make([
+        'host' => $c['mail_host'], 'port' => 993, 'encryption' => 'ssl', 'validate_cert' => true,
+        'protocol' => 'imap', 'username' => $user, 'password' => $password, 'timeout' => 20,
+    ]);
+    $client->connect();
+    return $client;
+}
+function getFolder(Client $client, string $name): Folder {
+    $folder = $client->getFolderByPath($name);
+    if (!$folder || $folder->no_select) { fail(404, 'folder_not_found', 'Ordner nicht gefunden oder nicht auswählbar.'); }
+    return $folder;
+}
+function folderName(Folder $f): string { return mb_convert_encoding($f->path, 'UTF-8', 'UTF7-IMAP'); }
+function loadMessage(Client $client, Folder $folder, int $uid, int $maxBytes, bool $body): Message {
+    $client->openFolder($folder->path);
+    $sizes = $client->getConnection()->sizes([$uid])->validatedData();
+    if (!isset($sizes[$uid])) { fail(404, 'message_not_found', 'Nachricht nicht gefunden.'); }
+    if ($body && $sizes[$uid] > $maxBytes) { fail(413, 'message_too_large', 'Nachricht überschreitet die Größenbegrenzung.'); }
+    $connection = $client->getConnection();
+    $headers = $connection->headers([$uid])->validatedData();
+    $flags = $connection->flags([$uid])->validatedData();
+    if (!isset($headers[$uid])) { fail(404, 'message_not_found', 'Nachricht nicht gefunden.'); }
+    $text = '';
+    if ($body) {
+        // Multiple fetch items let Webklex parse the server's BODY[TEXT] response
+        // to BODY.PEEK[TEXT]. No temporary Seen flag changes, even with concurrent clients.
+        $parts = $connection->fetch(['UID', 'BODY.PEEK[TEXT]'], [$uid])->validatedData();
+        if (!isset($parts[$uid]['BODY[TEXT]'])) { fail(502, 'fetch_failed', 'Nachricht konnte nicht gelesen werden.'); }
+        $text = $parts[$uid]['BODY[TEXT]'];
+    }
+    $m = Message::fromString(rtrim($headers[$uid], "\r\n") . "\r\n\r\n" . $text, $client->getConfig());
+    $m->setFolderPath($folder->path);
+    $m->setClient($client);
+    $m->setEvents(['message' => $client->getDefaultEvents('message'), 'flag' => $client->getDefaultEvents('flag')]);
+    $m->setSequence(\Webklex\PHPIMAP\IMAP::ST_UID);
+    $m->setUid($uid);
+    $m->size = (int)$sizes[$uid];
+    $m->parseRawFlags($flags[$uid] ?? []);
+    return $m;
+}
+function attachments(Message $m, bool $content = false): array {
+    $out = [];
+    foreach ($m->getAttachments() as $a) {
+        $item = ['index' => count($out), 'name' => $a->name ?: $a->filename ?: 'attachment',
+            'type' => $a->content_type ?: 'application/octet-stream', 'size' => strlen($a->content),
+            'content_id' => $a->id, 'disposition' => $a->disposition];
+        if ($content) { $item['content_base64'] = base64_encode($a->content); }
+        $out[] = $item;
+    }
+    return $out;
+}
+function summary(Message $m): array {
+    $addresses = static function ($attr): array {
+        $out = [];
+        foreach ($attr->all() as $a) { $out[] = ['email' => $a->mail, 'name' => $a->personal ?? '']; }
+        return $out;
+    };
+    return ['uid' => (int)$m->getUid(), 'date' => (string)$m->getDate(),
+        'from' => $addresses($m->getFrom()), 'to' => $addresses($m->getTo()), 'cc' => $addresses($m->getCc()),
+        'subject' => (string)$m->getSubject(), 'seen' => $m->hasFlag('Seen'),
+        'flagged' => $m->hasFlag('Flagged'), 'size' => (int)$m->getSize(),
+        'attachment_count' => $m->getAttachments()->count()];
+}
+function recipients(array $p, string $field, bool $required = false): array {
+    $list = $p[$field] ?? [];
+    if (is_string($list)) { $list = [$list]; }
+    if (!is_array($list) || !array_is_list($list) || count($list) > 50 || ($required && !$list)) {
+        fail(400, 'invalid_parameter', "Ungültiger Parameter: $field.");
+    }
+    foreach ($list as $email) {
+        if (!is_string($email) || strlen($email) > 254 || !filter_var($email, FILTER_VALIDATE_EMAIL)
+            || preg_match('/[\r\n]/', $email)) { fail(400, 'invalid_parameter', "Ungültiger Parameter: $field."); }
+    }
+    return $list;
+}
+function buildMail(array $p, array $c, string $user, #[SensitiveParameter] string $password): PHPMailer {
+    $mail = new PHPMailer(true);
+    $mail->isSMTP();
+    $mail->Host = $c['mail_host'];
+    $mail->Port = $c['smtp_port'];
+    $mail->SMTPSecure = $mail->Port === 465 ? PHPMailer::ENCRYPTION_SMTPS : PHPMailer::ENCRYPTION_STARTTLS;
+    $mail->SMTPAuth = true;
+    $mail->SMTPDebug = 0;
+    $mail->Timeout = 20;
+    $mail->Username = $user;
+    $mail->Password = $password;
+    $mail->CharSet = 'UTF-8';
+    $mail->setFrom($user);
+    foreach (['to' => 'addAddress', 'cc' => 'addCC', 'bcc' => 'addBCC', 'reply_to' => 'addReplyTo'] as $field => $method) {
+        foreach (recipients($p, $field, $field === 'to') as $email) { $mail->$method($email); }
+    }
+    $mail->Subject = lineparam($p, 'subject', null, 998);
+    $text = strparam($p, 'text', null, $c['max_message_bytes']);
+    if (isset($p['html'])) {
+        $mail->isHTML(true);
+        $mail->Body = strparam($p, 'html', null, $c['max_message_bytes']);
+        $mail->AltBody = $text;
+    } else { $mail->Body = $text; }
+    $mail->AllowEmpty = true;
+    foreach (['in_reply_to' => 'In-Reply-To', 'references' => 'References'] as $field => $header) {
+        if (isset($p[$field])) {
+            $v = lineparam($p, $field, null, 4096);
+            if (!preg_match('/^<[^<>\s@]+@[^<>\s@]+>(?: +<[^<>\s@]+@[^<>\s@]+>)*$/D', $v)
+                || ($field === 'in_reply_to' && str_contains($v, ' '))) {
+                fail(400, 'invalid_parameter', "Ungültiger Parameter: $field.");
+            }
+            $mail->addCustomHeader($header, $v);
+        }
+    }
+    $items = $p['attachments'] ?? [];
+    if (!is_array($items) || !array_is_list($items) || count($items) > 20) { fail(400, 'invalid_parameter', 'Ungültige Anhänge.'); }
+    $total = strlen($mail->Body) + strlen($mail->AltBody);
+    foreach ($items as $a) {
+        if (!is_array($a)) { fail(400, 'invalid_parameter', 'Ungültiger Anhang.'); }
+        $name = lineparam($a, 'name', null, 255);
+        if ($name === '' || strpbrk($name, '/\\') !== false) { fail(400, 'invalid_parameter', 'Ungültiger Anhangname.'); }
+        $type = lineparam($a, 'type', 'application/octet-stream', 127);
+        if (!preg_match('~^[a-zA-Z0-9!#$&^_.+-]+/[a-zA-Z0-9!#$&^_.+-]+$~D', $type)) { fail(400, 'invalid_parameter', 'Ungültiger MIME-Typ.'); }
+        $encoded = strparam($a, 'content_base64', null, $c['max_request_bytes']);
+        $data = base64_decode($encoded, true);
+        if ($data === false || base64_encode($data) !== $encoded) { fail(400, 'invalid_parameter', 'Ungültiges Base64.'); }
+        $total += strlen($data);
+        if ($total > $c['max_message_bytes']) { fail(413, 'message_too_large', 'Nachricht zu groß.'); }
+        $mail->addStringAttachment($data, $name, 'base64', $type);
+    }
+    $mail->preSend();
+    if (strlen($mail->getSentMIMEMessage()) > $c['max_message_bytes']) { fail(413, 'message_too_large', 'Nachricht zu groß.'); }
+    return $mail;
+}
+function dispatch(array $p, array $c, string $user, #[SensitiveParameter] string $password): array {
+    $action = lineparam($p, 'action', null, 32);
+    if (!in_array($action, ['folders', 'list', 'get', 'attachment', 'send', 'flag'], true)) { fail(400, 'invalid_action', 'Unbekannte Aktion.'); }
+    $name = lineparam($p, 'folder', 'INBOX');
+    $uid = in_array($action, ['get', 'attachment', 'flag'], true) ? intparam($p, 'uid', 1, 4294967295) : 0;
+    $limit = $action === 'list' ? intparam($p, 'limit', 1, 100, 20) : 0;
+    $since = $action === 'list' ? lineparam($p, 'since', '') : '';
+    if ($since !== '') {
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $since);
+        if (!$date || $date->format('Y-m-d') !== $since) { fail(400, 'invalid_parameter', 'since muss YYYY-MM-DD sein.'); }
+    }
+    $unseen = boolparam($p, 'unseen_only');
+    $mark = boolparam($p, 'mark_seen');
+    $index = $action === 'attachment' ? intparam($p, 'index', 0, 10000) : 0;
+    if ($action === 'flag') {
+        foreach (['seen', 'flagged'] as $field) { boolparam($p, $field); }
+        if (!isset($p['seen']) && !isset($p['flagged']) && !isset($p['move_to'])) { fail(400, 'invalid_parameter', 'Keine Änderung angegeben.'); }
+        if (isset($p['move_to'])) { lineparam($p, 'move_to'); }
+    }
+    $mail = $action === 'send' ? buildMail($p, $c, $user, $password) : null;
+    $client = connectMailbox($c, $user, $password);
+    try {
+        if ($action === 'folders') {
+            $out = [];
+            foreach ($client->getFolders(false) as $f) { $out[] = ['path' => folderName($f), 'name' => $f->name, 'selectable' => !$f->no_select]; }
+            return ['folders' => $out];
+        }
+        if ($action === 'send') {
+            $sent = getFolder($client, $c['sent_folder']); // Fail before SMTP if configuration is wrong.
+            try { $mail->postSend(); }
+            catch (Throwable) {
+                $smtp = $mail->getSMTPInstance()->getError();
+                if (in_array((int)($smtp['smtp_code'] ?? 0), [534, 535], true)) { fail(403, 'mail_auth_failed', 'Mail-Anmeldung fehlgeschlagen.'); }
+                fail(502, 'smtp_failed', 'Versand fehlgeschlagen; bei unklarem Zustellstatus vor erneutem Versand prüfen.');
+            }
+            $result = ['sent' => true, 'message_id' => $mail->getLastMessageID(), 'saved_to_sent' => false];
+            try {
+                $sent->appendMessage($mail->getSentMIMEMessage(), ['\\Seen']);
+                $result['saved_to_sent'] = true;
+            } catch (Throwable) { $result['warning'] = 'sent_copy_failed'; }
+            return $result;
+        }
+        $folder = getFolder($client, $name);
+        if ($action === 'list') {
+            $query = $folder->query()->all();
+            if ($since !== '') { $query->since($since); }
+            if ($unseen) { $query->unseen(); }
+            $uids = $query->search()->all();
+            rsort($uids, SORT_NUMERIC);
+            $uids = array_slice($uids, 0, $limit);
+            $out = []; $total = 0;
+            foreach ($uids as $messageUid) {
+                $m = loadMessage($client, $folder, (int)$messageUid, $c['max_message_bytes'], false);
+                $size = (int)$m->getSize();
+                $total += $size;
+                if ($size > $c['max_message_bytes'] || $total > $c['max_list_bytes']) {
+                    fail(413, 'list_too_large', 'Nachrichten überschreiten das Leselimit; limit reduzieren oder since nutzen.');
+                }
+                $m = loadMessage($client, $folder, (int)$messageUid, $c['max_message_bytes'], true);
+                $out[] = summary($m);
+            }
+            return ['folder' => $name, 'messages' => $out];
+        }
+        $m = loadMessage($client, $folder, $uid, $c['max_message_bytes'], $action !== 'flag');
+        if ($action === 'get') {
+            if ($mark && !$m->setFlag('Seen')) { fail(502, 'flag_failed', 'Markierung fehlgeschlagen.'); }
+            return summary($m) + ['headers' => $m->getHeader()->raw, 'text' => $m->getTextBody(),
+                'html' => $m->getHTMLBody(), 'attachments' => attachments($m)];
+        }
+        if ($action === 'attachment') {
+            $items = attachments($m, true);
+            if (!isset($items[$index])) { fail(404, 'attachment_not_found', 'Anhang nicht gefunden.'); }
+            return $items[$index];
+        }
+        $target = isset($p['move_to']) ? getFolder($client, $p['move_to']) : null;
+        if ($target && $target->path === $folder->path) { fail(400, 'invalid_parameter', 'Zielordner entspricht dem Quellordner.'); }
+        if ($target) {
+            $capabilities = $client->getConnection()->getCapabilities()->validatedData();
+            if (!in_array('MOVE', array_map('strtoupper', $capabilities), true)) {
+                fail(409, 'move_unsupported', 'Mailserver unterstützt sicheres UID MOVE nicht.');
+            }
+        }
+        foreach (['seen' => 'Seen', 'flagged' => 'Flagged'] as $field => $flag) {
+            if (array_key_exists($field, $p)) {
+                $ok = $p[$field] ? $m->setFlag($flag) : $m->unsetFlag($flag);
+                if (!$ok) { fail(502, 'flag_failed', 'Markierung fehlgeschlagen; Zustand vor Wiederholung prüfen.'); }
+            }
+        }
+        if ($target) {
+            $client->openFolder($folder->path);
+            $connection = $client->getConnection();
+            // Do not use Webklex move(): its fallback can expunge unrelated deleted mail.
+            $response = $connection->requestAndResponse('UID MOVE', [(string)$uid, $connection->escapeString($target->path)], true);
+            if (!$response->boolean()) { fail(502, 'move_failed', 'Verschieben fehlgeschlagen; Zustand vor Wiederholung prüfen.'); }
+        }
+        return ['updated' => true, 'moved_to' => $target ? folderName($target) : null];
+    } finally {
+        try { $client->disconnect(); } catch (Throwable) { /* Never expose library errors. */ }
+    }
+}
+function main(): void {
+    umask(0077);
+    try {
+        // Forwarded headers are intentionally not trusted. TLS terminator must set HTTPS on the server.
+        if (!in_array(strtolower((string)($_SERVER['HTTPS'] ?? '')), ['on', '1'], true)) { fail(426, 'https_required', 'HTTPS erforderlich.'); }
+        header('Strict-Transport-Security: max-age=31536000');
+        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') { header('Allow: POST'); fail(405, 'method_not_allowed', 'Nur POST erlaubt.'); }
+        $c = config();
+        authenticate($c, $_SERVER);
+        if (strtolower(trim(explode(';', $_SERVER['CONTENT_TYPE'] ?? '')[0])) !== 'application/json') { fail(415, 'json_required', 'Content-Type application/json erforderlich.'); }
+        if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > $c['max_request_bytes']) { fail(413, 'request_too_large', 'Anfrage zu groß.'); }
+        $raw = file_get_contents('php://input', false, null, 0, $c['max_request_bytes'] + 1);
+        if ($raw === false || strlen($raw) > $c['max_request_bytes']) { fail(413, 'request_too_large', 'Anfrage zu groß.'); }
+        try { $object = json_decode($raw, false, 32, JSON_THROW_ON_ERROR); }
+        catch (JsonException) { fail(400, 'invalid_json', 'Ungültiges JSON.'); }
+        if (!$object instanceof stdClass) { fail(400, 'invalid_json', 'JSON-Objekt erforderlich.'); }
+        $p = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
+        $user = $_SERVER['HTTP_X_MAIL_USER'] ?? '';
+        $password = $_SERVER['HTTP_X_MAIL_PASSWORD'] ?? '';
+        if (strlen($user) > 254 || !allowedMailbox($user, $c['allowed_mailboxes'])) { fail(403, 'mailbox_forbidden', 'Postfach nicht erlaubt.'); }
+        if ($password === '' || strlen($password) > 4096 || preg_match('/[\r\n\x00]/', $password)) { fail(403, 'mail_auth_failed', 'Mail-Anmeldung fehlgeschlagen.'); }
+        respond(200, ['ok' => true, 'data' => dispatch($p, $c, $user, $password)]);
+    } catch (ApiError $e) { respond($e->status, ['ok' => false, 'error' => ['code' => $e->errorCode, 'message' => $e->getMessage()]]); }
+    catch (\Webklex\PHPIMAP\Exceptions\AuthFailedException) { respond(403, ['ok' => false, 'error' => ['code' => 'mail_auth_failed', 'message' => 'Mail-Anmeldung fehlgeschlagen.']]); }
+    catch (\Webklex\PHPIMAP\Exceptions\MessageNotFoundException) { respond(404, ['ok' => false, 'error' => ['code' => 'message_not_found', 'message' => 'Nachricht nicht gefunden.']]); }
+    catch (Throwable) { respond(502, ['ok' => false, 'error' => ['code' => 'upstream_error', 'message' => 'Maildienst oder Serverkonfiguration derzeit nicht verfügbar.']]); }
+}
+if (!defined('IMAPI_TEST')) { main(); }
