@@ -89,8 +89,8 @@ try {
     file_put_contents($files[0], json_encode($records, JSON_THROW_ON_ERROR));
     expectError(fn() => authenticate($c, ['REMOTE_ADDR' => $identities[128]]), 401, 'unauthorized');
     authenticate($c, ['REMOTE_ADDR' => $identities[128], 'HTTP_AUTHORIZATION' => 'Bearer ' . $token]);
-    expectError(fn() => authenticate($c, ['REMOTE_ADDR' => $identities[0], 'HTTP_AUTHORIZATION' => 'Bearer ' . $token]), 429, 'rate_limited');
     verify(json_decode(file_get_contents($files[0]), true) === $records, 'Overflow evicted or modified active bans.');
+    expectError(fn() => authenticate($c, ['REMOTE_ADDR' => $identities[0], 'HTTP_AUTHORIZATION' => 'Bearer ' . $token]), 429, 'rate_limited');
     // A different private secret must produce a different distribution.
     $other = securityConfig(array_replace($base, ['api_key_hash' => password_hash($token, PASSWORD_BCRYPT)]), $root, 'secret-shards');
     $changed = false;
