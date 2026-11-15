@@ -151,9 +151,9 @@ function limiterOption(array $c, string $name, int $default, int $max = 86400): 
  */
 function limiterUpdate(array $c, string $scope, string $key, callable $update): mixed {
     if (!in_array($scope, ['ip', 'mail'], true)) { fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.'); }
-    $digest = hash('sha256', $key);
+    $digest = hash_hmac('sha256', $scope . ':' . $key, $c['api_key_hash']);
     $shard = sprintf('%02x', hexdec(substr($digest, 0, 2)) % 64);
-    $path = $c['state_dir'] . '/v2-' . $scope . '-' . $shard . '.json';
+    $path = $c['state_dir'] . '/v3-' . $scope . '-' . $shard . '.json';
     $f = @fopen($path, 'c+');
     if (!$f) { fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.'); }
     $deadline = hrtime(true) + 250_000_000;
@@ -175,7 +175,11 @@ function limiterUpdate(array $c, string $scope, string $key, callable $update): 
         foreach ($records as $id => $record) {
             if (!is_array($record) || ($record['expires'] ?? 0) <= $now) { unset($records[$id]); }
         }
-        if (!isset($records[$key]) && count($records) >= 128) {
+        $hasCapacity = isset($records[$key]) || count($records) < 128;
+        // An unauthenticated flood must not turn the bounded IP cache into an
+        // admission allowlist. Always verify new clients' Bearer keys, without
+        // evicting existing counters/bans. Mail guards remain fail-closed.
+        if (!$hasCapacity && $scope !== 'ip') {
             fail(503, 'rate_limit_capacity', 'Rate-Limit-Kapazität derzeit ausgeschöpft.');
         }
         $state = $records[$key] ?? [];
@@ -183,7 +187,7 @@ function limiterUpdate(array $c, string $scope, string $key, callable $update): 
         try { $result = $update($state); }
         catch (Throwable $e) { $error = $e; }
         $state['expires'] = max($now + 900, ($state['blocked'] ?? 0) + 60);
-        $records[$key] = $state;
+        if ($hasCapacity) { $records[$key] = $state; }
         $json = json_encode($records, JSON_THROW_ON_ERROR);
         if (strlen($json) > 2 * 1024 * 1024) { fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.'); }
         rewind($f);
@@ -300,7 +304,11 @@ function connectMailbox(array $c, string $user, #[SensitiveParameter] string $pa
         'host' => $transport['host'], 'ssl_options' => $transport['ssl'], 'port' => 993, 'encryption' => 'ssl', 'validate_cert' => true,
         'protocol' => 'imap', 'username' => $user, 'password' => $password, 'timeout' => 20,
     ]);
-    $client->connect();
+    try { $client->connect(); }
+    catch (\Webklex\PHPIMAP\Exceptions\ImapServerErrorException) {
+        // Webklex 6.2 raises this for a tagged LOGIN NO, not AuthFailedException.
+        fail(403, 'mail_auth_failed', 'Mail-Anmeldung fehlgeschlagen.');
+    }
     return $client;
 }
 function getFolder(Client $client, string $name): Folder {

@@ -73,16 +73,51 @@ try {
     for ($i = 0; count($identities) < 129; $i++) {
         $ip = inet_ntop(pack('N', 0xc6120000 + $i));
         $id = hash('sha256', clientNetwork($ip));
-        if (hexdec(substr(hash('sha256', $id), 0, 2)) % 64 === 0) { $identities[] = $ip; }
+        if (hexdec(substr(hash_hmac('sha256', 'ip:' . $id, $c['api_key_hash']), 0, 2)) % 64 === 0) { $identities[] = $ip; }
     }
     foreach ($identities as $i => $ip) {
-        expectError(fn() => authenticate($c, ['REMOTE_ADDR' => $ip]), $i < 128 ? 401 : 503, $i < 128 ? 'unauthorized' : 'rate_limit_capacity');
+        expectError(fn() => authenticate($c, ['REMOTE_ADDR' => $ip]), 401, 'unauthorized');
     }
     $files = stateFiles($c['state_dir']);
     verify(count($files) === 1 && count(json_decode(file_get_contents($files[0]), true)) === 128, 'Capacity grew or an active identity was evicted.');
+    authenticate($c, ['REMOTE_ADDR' => $identities[128], 'HTTP_AUTHORIZATION' => 'Bearer ' . $token]);
+    verify(count(json_decode(file_get_contents($files[0]), true)) === 128, 'Valid new client grew a full shard.');
+    // Even a shard containing only bans must still verify new clients.
+    $records = json_decode(file_get_contents($files[0]), true);
+    foreach ($records as &$record) { $record['blocked'] = time() + 600; }
+    unset($record);
+    file_put_contents($files[0], json_encode($records, JSON_THROW_ON_ERROR));
+    expectError(fn() => authenticate($c, ['REMOTE_ADDR' => $identities[128]]), 401, 'unauthorized');
+    authenticate($c, ['REMOTE_ADDR' => $identities[128], 'HTTP_AUTHORIZATION' => 'Bearer ' . $token]);
+    expectError(fn() => authenticate($c, ['REMOTE_ADDR' => $identities[0], 'HTTP_AUTHORIZATION' => 'Bearer ' . $token]), 429, 'rate_limited');
+    verify(json_decode(file_get_contents($files[0]), true) === $records, 'Overflow evicted or modified active bans.');
+    // A different private secret must produce a different distribution.
+    $other = securityConfig(array_replace($base, ['api_key_hash' => password_hash($token, PASSWORD_BCRYPT)]), $root, 'secret-shards');
+    $changed = false;
+    foreach (array_slice($identities, 0, 8) as $ip) {
+        expectError(fn() => authenticate($other, ['REMOTE_ADDR' => $ip]), 401, 'unauthorized');
+        $changed = $changed || basename(stateFiles($other['state_dir'])[0]) !== basename($files[0]);
+    }
+    verify($changed, 'Shard assignment did not depend on private secret.');
     // Full unauthenticated storage must not consume authenticated-mail storage.
     $_SERVER['REMOTE_ADDR'] = $identities[128];
     verify(mailAuthentication($c, 'fixture@sann.gmbh', static fn() => ['test' => true])['test'], 'Unauthenticated flood filled mail-auth storage.');
+
+    // Reproduce broad saturation as well as the targeted single-shard attack.
+    $c = securityConfig($base, $root, 'all-full');
+    $records = [];
+    for ($i = 0; $i < 128; $i++) { $records['fixture-' . $i] = ['expires' => time() + 900]; }
+    for ($i = 0; $i < 64; $i++) {
+        file_put_contents($c['state_dir'] . '/v3-ip-' . sprintf('%02x', $i) . '.json', json_encode($records, JSON_THROW_ON_ERROR));
+    }
+    foreach (['198.51.100.7', '203.0.113.20', '192.0.2.55'] as $ip) {
+        expectError(fn() => authenticate($c, ['REMOTE_ADDR' => $ip]), 401, 'unauthorized');
+        expectError(fn() => authenticate($c, ['REMOTE_ADDR' => $ip, 'HTTP_AUTHORIZATION' => 'Bearer ' . str_repeat('x', 64)]), 401, 'unauthorized');
+        authenticate($c, ['REMOTE_ADDR' => $ip, 'HTTP_AUTHORIZATION' => 'Bearer ' . $token]);
+    }
+    foreach (stateFiles($c['state_dir']) as $file) {
+        verify(json_decode(file_get_contents($file), true) === $records, 'Saturated IP storage grew or evicted existing state.');
+    }
 
     $c = securityConfig($base, $root, 'files');
     for ($i = 0; $i < 600; $i++) {
@@ -130,6 +165,13 @@ try {
     $ip = '192.0.2.70';
     $legacy = $c['state_dir'] . '/' . hash('sha256', $ip) . '.json';
     file_put_contents($legacy, json_encode(['requests' => [time()], 'failures' => [], 'blocked' => time() + 600], JSON_THROW_ON_ERROR));
+    $v2ip = $c['state_dir'] . '/v2-ip-00.json';
+    $v2mail = $c['state_dir'] . '/v2-mail-00.json';
+    $v2key = hash('sha256', '192.0.2.71');
+    $mailKey = 'mailbox:' . hash_hmac('sha256', 'migrated@sann.gmbh', $c['api_key_hash']);
+    $oldBan = ['blocked' => time() + 600, 'expires' => time() + 900];
+    file_put_contents($v2ip, json_encode([$v2key => $oldBan], JSON_THROW_ON_ERROR));
+    file_put_contents($v2mail, json_encode([$mailKey => $oldBan + ['pending' => ['fixture-lease' => time() + 60]]], JSON_THROW_ON_ERROR));
     $configFile = $c['state_dir'] . '/config.php';
     file_put_contents($configFile, '<?php return ' . var_export($c, true) . ';');
     $oldEnv = getenv('IMAPI_CONFIG');
@@ -142,6 +184,11 @@ try {
         fclose($pipes[1]); fclose($pipes[2]);
         verify(proc_close($process) === 0 && !is_file($legacy), 'Legacy state migration failed.');
         expectError(fn() => authenticate($c, ['REMOTE_ADDR' => $ip, 'HTTP_AUTHORIZATION' => 'Bearer ' . $token]), 429, 'rate_limited');
+        verify(!is_file($v2ip) && !is_file($v2mail), 'V2 state was not archived.');
+        expectError(fn() => authenticate($c, ['REMOTE_ADDR' => '192.0.2.71', 'HTTP_AUTHORIZATION' => 'Bearer ' . $token]), 429, 'rate_limited');
+        $_SERVER['REMOTE_ADDR'] = '192.0.2.72';
+        expectError(fn() => mailAuthentication($c, 'migrated@sann.gmbh', static fn() => ['unexpected' => true]), 429, 'mail_auth_rate_limited');
+        limiterUpdate($c, 'mail', $mailKey, static function (array &$s): void { verify(isset($s['pending']['fixture-lease']), 'Migration lost active reservations.'); });
     } finally {
         putenv($oldEnv === false ? 'IMAPI_CONFIG' : 'IMAPI_CONFIG=' . $oldEnv);
         unlink($configFile);
