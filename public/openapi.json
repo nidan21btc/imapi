@@ -1,0 +1,1418 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "imapi",
+    "version": "1.0.0",
+    "description": "HTTPS IMAP/SMTP gateway. A single POST / operation dispatches seven JSON actions. All three security credentials are required together on every API request. No client-selected mail host. The public static OpenAPI document contains no secrets and performs no mail operations. No automatic send retries or idempotency keys. Default limits: 60 requests/minute/IP network, 20 MiB JSON, 12 MiB MIME, 32 MiB body enrichment per listing; deployment config can override sizes. PHP validates string limits in UTF-8 bytes. Proxy/hosting errors may be non-JSON.",
+    "license": {
+      "name": "MIT",
+      "url": "https://github.com/nidan21btc/imapi/blob/main/LICENSE"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://imapi.sann.gmbh",
+      "description": "Production"
+    },
+    {
+      "url": "https://imapi.test",
+      "description": "Local development; local DNS and trusted development certificate required"
+    }
+  ],
+  "externalDocs": {
+    "description": "Setup, configuration and bot guidance",
+    "url": "https://github.com/nidan21btc/imapi/blob/main/README.md"
+  },
+  "security": [
+    {
+      "BearerAuth": [],
+      "MailUser": [],
+      "MailPassword": []
+    }
+  ],
+  "paths": {
+    "/": {
+      "post": {
+        "operationId": "invokeMailAction",
+        "summary": "Read and manage mail or send a message",
+        "description": "Select action in the JSON body; there are no /send, /list or /folders routes. Read operations use PEEK by default. Writes require the caller to decide whether they are appropriate. Do not retry send automatically after a timeout or smtp_status_unknown. On confirmed SMTP acceptance, sent=true remains true even if APPEND or a later completion step fails.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/FoldersRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CreateFolderRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ListRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/GetRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AttachmentRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SendRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/FlagRequest"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "action",
+                  "mapping": {
+                    "folders": "#/components/schemas/FoldersRequest",
+                    "create_folder": "#/components/schemas/CreateFolderRequest",
+                    "list": "#/components/schemas/ListRequest",
+                    "get": "#/components/schemas/GetRequest",
+                    "attachment": "#/components/schemas/AttachmentRequest",
+                    "send": "#/components/schemas/SendRequest",
+                    "flag": "#/components/schemas/FlagRequest"
+                  }
+                }
+              },
+              "examples": {
+                "folders": {
+                  "value": {
+                    "action": "folders"
+                  }
+                },
+                "create_folder": {
+                  "value": {
+                    "action": "create_folder",
+                    "folder": "Archiv/2026"
+                  }
+                },
+                "list": {
+                  "value": {
+                    "action": "list",
+                    "folder": "INBOX",
+                    "limit": 20,
+                    "since": "2026-11-01",
+                    "unseen_only": true
+                  }
+                },
+                "get": {
+                  "value": {
+                    "action": "get",
+                    "folder": "INBOX",
+                    "uid": 123,
+                    "mark_seen": false
+                  }
+                },
+                "attachment": {
+                  "value": {
+                    "action": "attachment",
+                    "folder": "INBOX",
+                    "uid": 123,
+                    "index": 0
+                  }
+                },
+                "send": {
+                  "value": {
+                    "action": "send",
+                    "to": [
+                      "recipient@example.org"
+                    ],
+                    "subject": "Hello",
+                    "text": "Hello!",
+                    "sent_folder": null
+                  }
+                },
+                "flag": {
+                  "value": {
+                    "action": "flag",
+                    "folder": "INBOX",
+                    "uid": 123,
+                    "seen": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success. SMTP acceptance stays successful even if saving to Sent fails. Match data to the requested action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/FoldersResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CreateFolderResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ListResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/GetResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AttachmentResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SendResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/FlagResponse"
+                    }
+                  ]
+                },
+                "examples": {
+                  "folders": {
+                    "value": {
+                      "ok": true,
+                      "data": {
+                        "folders": [
+                          {
+                            "path": "INBOX",
+                            "name": "INBOX",
+                            "selectable": true
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "create_folder": {
+                    "value": {
+                      "ok": true,
+                      "data": {
+                        "folder": "Archiv.2026",
+                        "created": true
+                      }
+                    }
+                  },
+                  "list": {
+                    "value": {
+                      "ok": true,
+                      "data": {
+                        "folder": "INBOX",
+                        "messages": [
+                          {
+                            "uid": 124,
+                            "date": "2026-11-15 12:00:00 +0100",
+                            "from": [
+                              {
+                                "email": "sender@example.org",
+                                "name": "Sender"
+                              }
+                            ],
+                            "to": [
+                              {
+                                "email": "user@example.org",
+                                "name": ""
+                              }
+                            ],
+                            "cc": [],
+                            "subject": "Hello",
+                            "seen": false,
+                            "flagged": false,
+                            "size": 13631488,
+                            "attachment_count": null,
+                            "too_large": true,
+                            "body_loaded": false
+                          },
+                          {
+                            "uid": 123,
+                            "date": "2026-11-15 12:00:00 +0100",
+                            "from": [
+                              {
+                                "email": "sender@example.org",
+                                "name": "Sender"
+                              }
+                            ],
+                            "to": [
+                              {
+                                "email": "user@example.org",
+                                "name": ""
+                              }
+                            ],
+                            "cc": [],
+                            "subject": "Hello",
+                            "seen": false,
+                            "flagged": false,
+                            "size": 512,
+                            "attachment_count": 0,
+                            "too_large": false,
+                            "body_loaded": true
+                          }
+                        ],
+                        "truncated": true
+                      }
+                    }
+                  },
+                  "get": {
+                    "value": {
+                      "ok": true,
+                      "data": {
+                        "uid": 123,
+                        "date": "2026-11-15 12:00:00 +0100",
+                        "from": [
+                          {
+                            "email": "sender@example.org",
+                            "name": "Sender"
+                          }
+                        ],
+                        "to": [
+                          {
+                            "email": "user@example.org",
+                            "name": ""
+                          }
+                        ],
+                        "cc": [],
+                        "subject": "Hello",
+                        "seen": false,
+                        "flagged": false,
+                        "size": 512,
+                        "attachment_count": 0,
+                        "headers": "Subject: Hello\r\n\r\n",
+                        "text": "Hello",
+                        "html": "",
+                        "attachments": []
+                      }
+                    }
+                  },
+                  "attachment": {
+                    "value": {
+                      "ok": true,
+                      "data": {
+                        "index": 0,
+                        "name": "hello.txt",
+                        "type": "text/plain",
+                        "size": 5,
+                        "content_id": null,
+                        "disposition": "attachment",
+                        "content_base64": "SGVsbG8="
+                      }
+                    }
+                  },
+                  "send": {
+                    "value": {
+                      "ok": true,
+                      "data": {
+                        "sent": true,
+                        "message_id": "<id@example.org>",
+                        "saved_to_sent": false
+                      }
+                    }
+                  },
+                  "flag": {
+                    "value": {
+                      "ok": true,
+                      "data": {
+                        "updated": true,
+                        "moved_to": null
+                      }
+                    }
+                  },
+                  "sent_copy_failed": {
+                    "value": {
+                      "ok": true,
+                      "data": {
+                        "sent": true,
+                        "message_id": "<id@example.org>",
+                        "saved_to_sent": false,
+                        "sent_folder_error": "Ablage im Gesendet-Ordner fehlgeschlagen",
+                        "warning": "sent_copy_failed"
+                      }
+                    }
+                  },
+                  "folder_exists": {
+                    "value": {
+                      "ok": true,
+                      "data": {
+                        "folder": "Gesendet",
+                        "created": false
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON/action/parameters. Codes: invalid_json, invalid_action, invalid_parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "invalid_parameter",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Bearer key. Codes: unauthorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "unauthorized",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Bearer challenge."
+              }
+            }
+          },
+          "403": {
+            "description": "Mailbox forbidden or IMAP/SMTP authentication failed. Codes: mailbox_forbidden, mail_auth_failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "mail_auth_failed",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Folder, message or attachment missing. sent_folder_not_found occurs before SMTP; nothing sent. Codes: folder_not_found, message_not_found, attachment_not_found, sent_folder_not_found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "folder_not_found",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Only POST is accepted by the API. Codes: method_not_allowed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "method_not_allowed",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Allow": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "POST"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Server does not support safe UID MOVE; no changes made. Codes: move_unsupported.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "move_unsupported",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request or full MIME message exceeds configured limits. Header-only list remains available. Codes: request_too_large, message_too_large.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "message_too_large",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type must be application/json. Codes: json_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "json_required",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "HTTPS required. Never send credentials over HTTP, including redirect attempts. Codes: https_required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "https_required",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "IP/API/mail-auth limit reached. Respect Retry-After seconds. Codes: rate_limited, mail_auth_rate_limited.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "mail_auth_rate_limited",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "description": "Seconds until retry; do not automatically retry send if delivery might have happened."
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream failure. For smtp_status_unknown delivery is uncertain: check before retrying. Flag/move/folder operations may have partially completed. Codes: upstream_error, smtp_failed, smtp_status_unknown, folder_create_failed, folder_subscribe_failed, sent_folder_prepare_failed, fetch_failed, flag_failed, move_failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "upstream_error",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Configuration, mail-host whitelist, limiter lock/storage/capacity unavailable. Usually rejected before mail access; a later limiter bookkeeping error can follow a read or mutation. Confirmed SMTP acceptance is never converted to a failed send. Codes: configuration_error, mail_server_forbidden, rate_limit_unavailable, rate_limit_capacity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "rate_limit_unavailable",
+                    "message": "Anfrage konnte nicht ausgeführt werden."
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "description": "May be present for limiter lock contention (1 second)."
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Opaque API key",
+        "description": "Authorization: Bearer <API key>. Not JWT. Configured separately from mailbox credentials."
+      },
+      "MailUser": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Mail-User",
+        "description": "Full permitted mailbox email address, max 254 bytes."
+      },
+      "MailPassword": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Mail-Password",
+        "description": "Mailbox password on every API request; nonempty, max 4096 bytes, no CR/LF/NUL. Never log or embed in examples."
+      }
+    },
+    "schemas": {
+      "FolderPath": {
+        "type": "string",
+        "description": "UTF-8 folder path, at most 1024 UTF-8 bytes; use the exact path from folders. No control characters.",
+        "maxLength": 1024
+      },
+      "UID": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 4294967295,
+        "description": "UID within a folder and its current UIDVALIDITY. Re-list after a move or mailbox reset."
+      },
+      "Email": {
+        "type": "string",
+        "description": "Bare email address without display name; at most 254 bytes.",
+        "format": "email",
+        "maxLength": 254
+      },
+      "Recipients": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Email"
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Email"
+            },
+            "maxItems": 50
+          }
+        ],
+        "description": "One bare address or a list of at most 50 addresses. For to, the list must not be empty."
+      },
+      "UploadAttachment": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Nonempty filename, at most 255 UTF-8 bytes; no control characters, / or backslash.",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "type": {
+            "type": "string",
+            "description": "MIME type; defaults to application/octet-stream.",
+            "default": "application/octet-stream",
+            "maxLength": 127
+          },
+          "content_base64": {
+            "type": "string",
+            "description": "Canonical Base64, no whitespace or line breaks. Decoded data and final MIME message must fit configured limits.",
+            "format": "byte"
+          }
+        },
+        "required": [
+          "name",
+          "content_base64"
+        ]
+      },
+      "FoldersRequest": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "folders"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "description": "List folders. Read only."
+      },
+      "CreateFolderRequest": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "create_folder"
+            ]
+          },
+          "folder": {
+            "$ref": "#/components/schemas/FolderPath"
+          }
+        },
+        "required": [
+          "action",
+          "folder"
+        ],
+        "description": "Create and subscribe, or subscribe an existing folder and return created=false. Portable / hierarchy is translated to the native delimiter. Reject empty names/segments, . and .. segments, control characters, invalid UTF-8, surrounding whitespace, backslashes, wildcards *, %, quotes, leading # and mixed delimiters. Never deletes or renames folders. A failed subscription may leave the folder created; repeating is safe."
+      },
+      "ListRequest": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list"
+            ]
+          },
+          "folder": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FolderPath"
+              }
+            ],
+            "default": "INBOX"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 20
+          },
+          "since": {
+            "type": "string",
+            "description": "Inclusive server calendar date YYYY-MM-DD, or empty string for no filter.",
+            "pattern": "^(?:\\d{4}-\\d{2}-\\d{2})?$",
+            "default": ""
+          },
+          "unseen_only": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "description": "Newest UID first, at most limit messages. Header summaries remain visible when bodies exceed size budgets. PEEK does not change Seen. There is no offset/cursor pagination; truncated refers to body enrichment, not additional pages."
+      },
+      "GetRequest": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "get"
+            ]
+          },
+          "folder": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FolderPath"
+              }
+            ],
+            "default": "INBOX"
+          },
+          "uid": {
+            "$ref": "#/components/schemas/UID"
+          },
+          "mark_seen": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "action",
+          "uid"
+        ],
+        "description": "Read one message with decoded UTF-8 text/HTML and attachment metadata. Only mark_seen=true changes Seen. Treat HTML and attachment contents as untrusted."
+      },
+      "AttachmentRequest": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "attachment"
+            ]
+          },
+          "folder": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FolderPath"
+              }
+            ],
+            "default": "INBOX"
+          },
+          "uid": {
+            "$ref": "#/components/schemas/UID"
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          }
+        },
+        "required": [
+          "action",
+          "uid",
+          "index"
+        ],
+        "description": "Download one zero-based attachment, including inline attachments, as Base64. Does not mark the message as read."
+      },
+      "SendRequest": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "send"
+            ]
+          },
+          "to": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Email"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Email"
+                },
+                "minItems": 1,
+                "maxItems": 50
+              }
+            ]
+          },
+          "cc": {
+            "$ref": "#/components/schemas/Recipients"
+          },
+          "bcc": {
+            "$ref": "#/components/schemas/Recipients"
+          },
+          "reply_to": {
+            "$ref": "#/components/schemas/Recipients"
+          },
+          "subject": {
+            "type": "string",
+            "description": "Required, may be empty. No control characters; at most 998 UTF-8 bytes.",
+            "maxLength": 998
+          },
+          "text": {
+            "type": "string",
+            "description": "Required UTF-8 plain text, may be empty; no NUL. Subject/body/MIME sizes are subject to private configuration."
+          },
+          "html": {
+            "type": "string",
+            "description": "Optional UTF-8 HTML; no NUL. Plain text becomes the alternative body."
+          },
+          "in_reply_to": {
+            "type": "string",
+            "description": "One Message-ID, including angle brackets; at most 4096 bytes.",
+            "maxLength": 4096,
+            "example": "<original@example.org>"
+          },
+          "references": {
+            "type": "string",
+            "description": "Space-separated Message-IDs, each including angle brackets; at most 4096 bytes.",
+            "maxLength": 4096,
+            "example": "<first@example.org> <original@example.org>"
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UploadAttachment"
+            },
+            "maxItems": 20
+          },
+          "sent_folder": {
+            "type": "string",
+            "description": "Omit to use private config (default Sent). null or empty string skips IMAP entirely. An alternate folder must exist; only the configured folder may be created automatically. At most 1024 UTF-8 bytes.",
+            "nullable": true,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "action",
+          "to",
+          "subject",
+          "text"
+        ],
+        "description": "From/envelope sender are always the authenticated mailbox; Bcc is absent from MIME headers. Before SMTP, prepare the configured Sent folder; failure prevents SMTP. Once SMTP accepts DATA, return ok=true/sent=true even if APPEND fails. Never automatically retry a successful send or smtp_status_unknown. No idempotency key or automatic retries. A partial recipient rejection can yield sent=true with smtp_warning; do not resend the whole message."
+      },
+      "FlagRequest": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "flag"
+            ]
+          },
+          "folder": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FolderPath"
+              }
+            ],
+            "default": "INBOX"
+          },
+          "uid": {
+            "$ref": "#/components/schemas/UID"
+          },
+          "seen": {
+            "type": "boolean"
+          },
+          "flagged": {
+            "type": "boolean"
+          },
+          "move_to": {
+            "$ref": "#/components/schemas/FolderPath"
+          }
+        },
+        "required": [
+          "action",
+          "uid"
+        ],
+        "description": "Set/clear Seen or Flagged and/or move to an existing different folder. Omitted flags are unchanged. UID MOVE support is checked before changes; no delete endpoint or COPY/DELETE/EXPUNGE fallback. Multiple changes are not atomic; inspect state after an error. Destination UID may change.",
+        "anyOf": [
+          {
+            "required": [
+              "seen"
+            ]
+          },
+          {
+            "required": [
+              "flagged"
+            ]
+          },
+          {
+            "required": [
+              "move_to"
+            ]
+          }
+        ]
+      },
+      "Address": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "name"
+        ]
+      },
+      "MessageSummary": {
+        "type": "object",
+        "properties": {
+          "uid": {
+            "$ref": "#/components/schemas/UID"
+          },
+          "date": {
+            "type": "string",
+            "description": "Mail header date as returned by the library, not a guaranteed RFC3339 timestamp; may be empty."
+          },
+          "from": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Address"
+            }
+          },
+          "to": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Address"
+            }
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Address"
+            }
+          },
+          "subject": {
+            "type": "string"
+          },
+          "seen": {
+            "type": "boolean"
+          },
+          "flagged": {
+            "type": "boolean"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Reported raw MIME size in bytes."
+          },
+          "attachment_count": {
+            "type": "integer",
+            "minimum": 0,
+            "nullable": true,
+            "description": "Number including inline attachments, or null if the MIME body was not loaded; null is not zero."
+          }
+        },
+        "required": [
+          "uid",
+          "date",
+          "from",
+          "to",
+          "cc",
+          "subject",
+          "seen",
+          "flagged",
+          "size",
+          "attachment_count"
+        ]
+      },
+      "ListMessage": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/MessageSummary"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "too_large": {
+                "type": "boolean",
+                "description": "Raw size exceeds the configured per-message limit."
+              },
+              "body_loaded": {
+                "type": "boolean",
+                "description": "Body was fetched with PEEK for MIME/attachment enrichment."
+              }
+            },
+            "required": [
+              "too_large",
+              "body_loaded"
+            ]
+          }
+        ]
+      },
+      "AttachmentMetadata": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Decoded attachment bytes."
+          },
+          "content_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "disposition": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "index",
+          "name",
+          "type",
+          "size",
+          "content_id",
+          "disposition"
+        ]
+      },
+      "FoldersData": {
+        "type": "object",
+        "properties": {
+          "folders": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "selectable": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "path",
+                "name",
+                "selectable"
+              ]
+            }
+          }
+        },
+        "required": [
+          "folders"
+        ]
+      },
+      "CreateFolderData": {
+        "type": "object",
+        "properties": {
+          "folder": {
+            "type": "string",
+            "description": "Actual UTF-8 path using the native hierarchy delimiter."
+          },
+          "created": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "folder",
+          "created"
+        ]
+      },
+      "ListData": {
+        "type": "object",
+        "properties": {
+          "folder": {
+            "type": "string"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ListMessage"
+            }
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "At least one selected body was skipped due to size budgets. All selected header summaries are still included; not a pagination indicator."
+          }
+        },
+        "required": [
+          "folder",
+          "messages",
+          "truncated"
+        ]
+      },
+      "GetData": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/MessageSummary"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "headers": {
+                "type": "string",
+                "description": "Raw full message headers."
+              },
+              "text": {
+                "type": "string",
+                "description": "UTF-8 plain text; empty if absent."
+              },
+              "html": {
+                "type": "string",
+                "description": "UTF-8 HTML; empty if absent. Untrusted content."
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AttachmentMetadata"
+                }
+              }
+            },
+            "required": [
+              "headers",
+              "text",
+              "html",
+              "attachments"
+            ]
+          }
+        ]
+      },
+      "AttachmentData": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AttachmentMetadata"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "content_base64": {
+                "type": "string",
+                "format": "byte"
+              }
+            },
+            "required": [
+              "content_base64"
+            ]
+          }
+        ]
+      },
+      "SendData": {
+        "type": "object",
+        "properties": {
+          "sent": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "message_id": {
+            "type": "string",
+            "description": "Actual Message-ID including angle brackets."
+          },
+          "saved_to_sent": {
+            "type": "boolean"
+          },
+          "sent_folder_error": {
+            "type": "string",
+            "description": "Present only if requested Sent copy failed after SMTP acceptance."
+          },
+          "warning": {
+            "type": "string",
+            "enum": [
+              "sent_copy_failed"
+            ]
+          },
+          "smtp_warning": {
+            "type": "string",
+            "description": "SMTP accepted but subsequent recipient/completion errors occurred; do not resend."
+          },
+          "security_warning": {
+            "type": "string",
+            "description": "SMTP accepted but limiter state could not be updated; do not resend."
+          }
+        },
+        "required": [
+          "sent",
+          "message_id",
+          "saved_to_sent"
+        ]
+      },
+      "FlagData": {
+        "type": "object",
+        "properties": {
+          "updated": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "moved_to": {
+            "type": "string",
+            "nullable": true,
+            "description": "Destination folder or null if no move was requested."
+          }
+        },
+        "required": [
+          "updated",
+          "moved_to"
+        ]
+      },
+      "FoldersResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/FoldersData"
+          }
+        },
+        "required": [
+          "ok",
+          "data"
+        ]
+      },
+      "CreateFolderResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/CreateFolderData"
+          }
+        },
+        "required": [
+          "ok",
+          "data"
+        ]
+      },
+      "ListResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/ListData"
+          }
+        },
+        "required": [
+          "ok",
+          "data"
+        ]
+      },
+      "GetResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/GetData"
+          }
+        },
+        "required": [
+          "ok",
+          "data"
+        ]
+      },
+      "AttachmentResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/AttachmentData"
+          }
+        },
+        "required": [
+          "ok",
+          "data"
+        ]
+      },
+      "SendResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/SendData"
+          }
+        },
+        "required": [
+          "ok",
+          "data"
+        ]
+      },
+      "FlagResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/FlagData"
+          }
+        },
+        "required": [
+          "ok",
+          "data"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Stable machine-readable error code; branch on this, not message text."
+              },
+              "message": {
+                "type": "string",
+                "description": "Human-readable German hint; no raw library errors or credentials."
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "error"
+        ]
+      }
+    }
+  }
+}

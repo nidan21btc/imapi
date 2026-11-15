@@ -3,6 +3,15 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
+  openapi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Validate OpenAPI and examples
+        run: |
+          python3 -m venv "$RUNNER_TEMP/imapi-openapi"
+          "$RUNNER_TEMP/imapi-openapi/bin/pip" install --disable-pip-version-check openapi-spec-validator==0.7.2
+          "$RUNNER_TEMP/imapi-openapi/bin/python" tests/openapi.py
   check:
     runs-on: ubuntu-latest
     strategy:

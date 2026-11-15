@@ -1,6 +1,6 @@
 # imapi
 
-Kleine HTTPS-Schnittstelle für IMAP und SMTP, PHP **8.2 oder neuer**. Ein öffentlicher Einstiegspunkt, sieben Aktionen. Mail-Zugangsdaten kommen bei jeder Anfrage über Header und werden weder in Dateien noch in Logs gespeichert. SMTP verwendet PHPMailer, IMAP Webklex ohne native IMAP-Erweiterung.
+Kleine HTTPS-Schnittstelle für IMAP und SMTP, PHP **8.2 oder neuer**. Ein API-Einstiegspunkt, sieben Aktionen und eine statische OpenAPI-Datei. Mail-Zugangsdaten kommen bei jeder Anfrage über Header und werden weder in Dateien noch in Logs gespeichert. SMTP verwendet PHPMailer, IMAP Webklex ohne native IMAP-Erweiterung.
 
 ## Einrichtung auf Webhosting
 
@@ -11,6 +11,7 @@ Kleine HTTPS-Schnittstelle für IMAP und SMTP, PHP **8.2 oder neuer**. Ein öffe
    ```text
    /home/ACCOUNT/imapi/
      public/index.php         ← DocumentRoot der API-Domain
+     public/openapi.json      ← öffentliche API-Beschreibung, ohne Zugangsdaten
      vendor/
      private/config.php       ← nicht per HTTP erreichbar
      private/rate-limit/      ← privat, für PHP schreibbar
@@ -22,12 +23,38 @@ Kleine HTTPS-Schnittstelle für IMAP und SMTP, PHP **8.2 oder neuer**. Ein öffe
 4. `mkdir -p private/rate-limit && cp config.example.php private/config.php`. Private Verzeichnisse mit `0700`, Config mit `0600` absichern, wenn PHP unter demselben Benutzer läuft. Bei separatem PHP-Benutzer gezielt Gruppenrechte vergeben: private Verzeichnisse `0750`, Config `0640`, das für PHP schreibbare Statusverzeichnis `0770`. Nur `rate-limit/` braucht Schreibrechte für den Webprozess. Keine `0777`-Rechte.
 5. `php bin/key.php /home/ACCOUNT/imapi/private/config.php` erzeugt einen zufälligen 256-Bit-Key, zeigt ihn einmal an und schreibt ausschließlich einen bcrypt-Hash atomar in die Config. Rotation erfolgt mit demselben Befehl; der alte Key wird sofort ungültig. Das Skript setzt die Config auf `0600`; bei separatem Web-Benutzer anschließend die passende Gruppe und `0640` erneut setzen.
 6. In der Config `allowed_mailboxes`, `sent_folder` und gegebenenfalls `smtp_port` anpassen. Der Zielhost kommt ausschließlich aus `mail_host` in der privaten Config und muss in `allowed_mail_hosts` stehen (exakte Hostnamen, keine Wildcards). Standard ist `cloud3-vm338.de-nserver.de`: IMAP 993 mit TLS; SMTP 465 mit TLS oder 587 mit verpflichtendem STARTTLS. Ein vom Client übergebener Host wird nicht verwendet. Zertifikatsprüfung bleibt eingeschaltet. Keine Mail-Passwörter eintragen. Den exakten UTF-8-Pfad des Gesendet-Ordners über `folders` ermitteln (z. B. `Gesendet`, `Sent` oder `INBOX.Sent`). Der konfigurierte Standard ist `Sent`; vorhandene individuelle Einstellungen bleiben bestehen. Mit `create_sent_folder_if_missing=true` (Standard) wird ausschließlich dieser konfigurierte Gesendet-Ordner vor dem SMTP-Versand bei Bedarf angelegt und abonniert. Schlägt die Vorbereitung fehl, wird nichts versendet. Bei `false` muss er bereits existieren. Andere Ordner werden nur explizit mit `create_folder` angelegt; Lesen und Verschieben legen niemals Ordner an.
-7. API-Domain mit gültigem TLS-Zertifikat auf `public/` richten. Bei unveränderlichem `public_html` nur `index.php` dorthin kopieren und dessen Autoloader-Pfad auf das private `vendor/autoload.php` ändern. `IMAPI_CONFIG` als serverseitige Umgebungsvariable auf den absoluten Config-Pfad setzen. Ohne diese Variable wird `../private/config.php` relativ zum Einstiegspunkt verwendet. Config, Composer-Dateien, Tests und `vendor/` niemals öffentlich bereitstellen.
+7. API-Domain mit gültigem TLS-Zertifikat auf `public/` richten. Bei unveränderlichem `public_html` `index.php` und `openapi.json` dorthin kopieren und dessen Autoloader-Pfad auf das private `vendor/autoload.php` ändern. `IMAPI_CONFIG` als serverseitige Umgebungsvariable auf den absoluten Config-Pfad setzen. Ohne diese Variable wird `../private/config.php` relativ zum Einstiegspunkt verwendet. Config, Composer-Dateien, Tests und `vendor/` niemals öffentlich bereitstellen.
 8. Authorization-Header an PHP weiterreichen, unter Apache etwa mit `CGIPassAuth On` im VHost/Directory oder, falls vom Hoster unterstützt, `.htaccess` mit `SetEnvIf Authorization "(.+)" HTTP_AUTHORIZATION=$1`. Requests dürfen im Webserver, Proxy, CDN, WAF oder APM **nicht mit Headern oder Body aufgezeichnet** werden. Normale Access-Logs ohne diese Daten sind möglich. Zugangsdaten gehören ausschließlich in Header, niemals in URL/Querystring. PHP unterdrückt rohe Bibliotheksfehler und Fehlerlogs für diesen Einstiegspunkt.
 
-Die API prüft das serverseitige `HTTPS=on/1` und lehnt HTTP mit 426 ab. Clients müssen direkt HTTPS verwenden: Ein Redirect oder eine 426-Antwort kann bereits unverschlüsselt gesendete Header nicht schützen. HTTP-Prüfungen daher immer ohne Zugangsdaten ausführen. Wenn vom Hoster unterstützt, eingehende Klartextverbindungen für diese API bereits vor PHP ablehnen. Hinter einem TLS-Proxy muss der Webserver diese Variable ausschließlich für einen vertrauenswürdigen Proxy setzen; vom Client gesendete Forwarded-Header werden nicht ausgewertet. Die IP für Rate-Limits ist `REMOTE_ADDR`: hinter einem Proxy muss der Webserver die echte IP vertrauenswürdig auflösen, sonst teilen alle Clients ein Limit.
+Die dynamische API prüft das serverseitige `HTTPS=on/1` und lehnt HTTP mit 426 ab. Clients müssen direkt HTTPS verwenden: Ein Redirect oder eine 426-Antwort kann bereits unverschlüsselt gesendete Header nicht schützen. HTTP-Prüfungen daher immer ohne Zugangsdaten ausführen. Wenn vom Hoster unterstützt, eingehende Klartextverbindungen für diese API bereits vor PHP ablehnen. Hinter einem TLS-Proxy muss der Webserver diese Variable ausschließlich für einen vertrauenswürdigen Proxy setzen; vom Client gesendete Forwarded-Header werden nicht ausgewertet. Die IP für Rate-Limits ist `REMOTE_ADDR`: hinter einem Proxy muss der Webserver die echte IP vertrauenswürdig auflösen, sonst teilen alle Clients ein Limit.
 
 Ausgehende Verbindungen vom Webhosting zu 993 und 465 bzw. 587 müssen erlaubt sein. Es ist kein Daemon, Framework, Datenbankserver oder Cronjob erforderlich. Rate-Limit-Dateien nutzen `flock` auf einem lokalen Dateisystem; für mehrere Webserver braucht es einen gemeinsamen atomaren Limiter. Der Limiter verwendet eine feste Anzahl begrenzter Statusdateien; abgelaufene Datensätze werden bei jedem Zugriff auf die jeweilige Datei bereinigt, auch bei ungültigen oder bereits gesperrten Anfragen.
+
+## OpenAPI und Hinweise für Bots
+
+Produktion: **https://imapi.sann.gmbh/**. Die maschinenlesbare Beschreibung nach [OpenAPI 3.0.3](https://spec.openapis.org/oas/v3.0.3.html) ist öffentlich unter **[https://imapi.sann.gmbh/openapi.json](https://imapi.sann.gmbh/openapi.json)** abrufbar; die versionierte Quelle ist [public/openapi.json](public/openapi.json). Nur diese statische Dokumentation kann ohne Zugangsdaten per GET abgerufen werden; sie baut keine Mailverbindung auf. In einer eigenen Installation die Datei mit hochladen und die `servers`-URLs anpassen. Eine Swagger-UI oder zusätzlicher Dokumentationsdienst ist nicht erforderlich.
+
+Es gibt **einen** API-Aufruf `POST /` mit `operationId=invokeMailAction`. Die sieben Aktionen werden durch `action` unterschieden, nicht durch URL-Pfade. Die OpenAPI beschreibt alle Anfragevarianten mit `oneOf` und einem `action`-Discriminator, Pflichtfelder, Defaults, Antwortschemas, Fehlercodes und Beispiele. Der HTTP-200-Antworttyp richtet sich nach der angefragten Aktion; die Antwort selbst enthält kein `action`-Feld.
+
+Jeder API-Aufruf benötigt gleichzeitig:
+
+| Header | Inhalt |
+| --- | --- |
+| `Authorization` | `Bearer <API-Key>`, kein JWT und keine HTTP-Basic-Authentifizierung |
+| `X-Mail-User` | vollständige erlaubte Postfachadresse, höchstens 254 Bytes |
+| `X-Mail-Password` | nichtleeres Mail-Passwort, höchstens 4096 Bytes, kein CR/LF/NUL |
+| `Content-Type` | `application/json` |
+
+Die drei Authentifizierungsschemas sind in **einer** OpenAPI-Sicherheitsanforderung verknüpft: alle sind erforderlich. Bot-Plattformen müssen `oneOf` und die Übergabe aller drei Authentifizierungsheader unterstützen; ein Import allein konfiguriert keine Zugangsdaten. Secrets über die geschützte Laufzeitkonfiguration des Bots einsetzen, niemals in die OpenAPI, Prompts, URLs oder Logs schreiben. Zugangsdaten ausschließlich direkt über HTTPS senden und TLS-Prüfung eingeschaltet lassen.
+
+Für zuverlässige Nutzung:
+
+- Zunächst `folders` aufrufen und die zurückgegebenen Ordnerpfade verwenden. UIDs gehören zum jeweiligen Ordner und können sich beim Verschieben ändern.
+- Wenige Anfragen gleichzeitig senden. Die Voreinstellung reserviert höchstens fünf laufende Mailoperationen pro IP-Netz, abzüglich bereits gezählter Anmeldefehler. Bei 429 `Retry-After` (Sekunden) beachten; falsche Zugangsdaten zuerst korrigieren, statt sie wiederholt zu versuchen.
+- `list.truncated` bedeutet unvollständige Body-/Anhangauswertung, keine Folgeseite. Es gibt keine Cursor-/Offset-Paginierung. `attachment_count:null` heißt unbekannt; `get`/`attachment` können für eine große Mail weiterhin 413 liefern.
+- `get` und `attachment` lassen Seen unverändert; `get` mit `mark_seen:true` markiert ausdrücklich als gelesen. HTML und Anhänge sind nicht vertrauenswürdig.
+- Bei `send` nach `ok:true`/`sent:true` **nicht erneut senden**, auch bei `saved_to_sent:false`, `smtp_warning` oder `security_warning`. Ohne gewünschte Ablage ist `saved_to_sent:false` normal. `smtp_status_unknown`, ein Timeout oder ein Verbindungsabbruch liefern keine sichere Aussage zur Zustellung: erst prüfen, dann über eine Wiederholung entscheiden. Es gibt keinen Idempotenzschlüssel.
+- Fehler über HTTP-Status und `error.code` auswerten, nicht über den deutschen Meldungstext. Änderungen mit `flag` sind nicht atomar; nach Fehlern den Zustand prüfen. `create_folder` kann nach fehlgeschlagenem Abonnieren erneut aufgerufen werden; ein vorhandener Ordner liefert `created:false`.
 
 ## API und Beispiele
 
@@ -36,7 +63,7 @@ Alle Aufrufe gehen als **POST an dieselbe URL**, die Aktion steht im JSON-Feld `
 Für Bash eine kurzlebige Header-Datei statt sichtbarer Passwörter in Prozessargumenten verwenden:
 
 ```bash
-URL='https://imapi.test/'
+URL='https://imapi.sann.gmbh/'
 read -r -s -p 'API-Key: ' API_KEY; echo
 read -r -p 'Mail-Benutzer: ' MAIL_USER
 read -r -s -p 'Mail-Passwort: ' MAIL_PASSWORD; echo
@@ -46,8 +73,9 @@ trap 'rm -f "$HEADERS"; unset API_KEY MAIL_USER MAIL_PASSWORD' EXIT
 printf 'Authorization: Bearer %s\nX-Mail-User: %s\nX-Mail-Password: %s\nContent-Type: application/json\n' \
   "$API_KEY" "$MAIL_USER" "$MAIL_PASSWORD" > "$HEADERS"
 unset API_KEY MAIL_USER MAIL_PASSWORD
-# Entwicklung: eigenes Zertifikat ausdrücklich vertrauen. Produktion: CA-Option weglassen.
-api() { curl --silent --show-error --fail-with-body --cacert .dev/imapi.test.crt \
+# Produktion verwendet die normale Zertifikatsprüfung.
+# Für Entwicklung URL=https://imapi.test/ setzen und --cacert .dev/imapi.test.crt ergänzen.
+api() { curl --silent --show-error --fail-with-body \
   --header @"$HEADERS" --data-binary "$1" "$URL"; echo; }
 ```
 
@@ -95,7 +123,7 @@ Diese Datei liegt nur vorübergehend **auf dem Client**, nicht auf dem API-Serve
 
    Vor dem SMTP-Versand wird der Gesendet-Ordner per IMAP geprüft. Fehlt der Ordner aus der privaten Config und ist `create_sent_folder_if_missing=true`, wird er angelegt und abonniert. Schlägt diese Vorbereitung fehl, startet SMTP nicht. Ein abweichender Ordner aus der Anfrage muss bereits existieren. Bei `create_sent_folder_if_missing=false` gilt das auch für den konfigurierten Ordner. Nach bestätigter SMTP-Annahme wird die Mail per IMAP-APPEND abgelegt. Nach SMTP-Annahme lautet die Antwort immer HTTP 200 mit `ok:true`, `sent:true`, der tatsächlichen `message_id` und `saved_to_sent:true|false`. Bei fehlgeschlagener Ablage kommen `sent_folder_error` (z. B. `Ordner nicht gefunden`) und aus Kompatibilitätsgründen `warning="sent_copy_failed"` hinzu. **Dann keinesfalls erneut senden.** Außer dem konfigurierten Gesendet-Ordner werden keine Ordner automatisch angelegt.
 
-   Pro Anfrage überschreibt `sent_folder` die private Config. `null` oder `""` überspringen die Ablage vollständig: `saved_to_sent:false` ohne `sent_folder_error` oder `warning`, und ohne IMAP-Verbindung.
+   Pro Anfrage überschreibt `sent_folder` die private Config. Auch in der privaten Config kann `sent_folder` mit `null` oder `""` die Ablage standardmäßig deaktivieren. `null` oder `""` überspringen die Ablage vollständig: `saved_to_sent:false` ohne `sent_folder_error` oder `warning`, und ohne IMAP-Verbindung.
 
    ```bash
    api '{"action":"send","to":"empfaenger@example.org","subject":"Hallo","text":"Hallo!","sent_folder":"Gesendet"}'
@@ -144,7 +172,7 @@ Diese Datei liegt nur vorübergehend **auf dem Client**, nicht auf dem API-Serve
 
 Optional beschränkt **`local_only => true` ausschließlich ausgehende IMAP-/SMTP-Verbindungen** auf die feste IPv4-Loopback-Adresse `127.0.0.1`. Es gibt keinen DNS-Fallback auf andere Adressen. Host-Whitelist und feste Mailports gelten weiterhin. Der freigegebene `mail_host` bleibt der TLS-Peername und wird für SNI und die Zertifikatsprüfung verwendet; TLS wird auch lokal nicht abgeschaltet. Der Schalter setzt erreichbare Maildienste auf derselben Maschine voraus. Sind diese nicht verfügbar oder passt ihr Zertifikat nicht, scheitert die Verbindung geschlossen. Die eingehende HTTPS-Erreichbarkeit der API wird davon nicht verändert. Standard ist `false`.
 
-Die Reihenfolge ist HTTPS/Methode → Config-Prüfung ohne Netzwerk → IP-Limiter und Bearer-Verifikation → JSON/Postfach-Whitelist → Mail-Anmeldelimiter → IMAP/SMTP. Ohne gültigen Bearer-Token gibt es keine ausgehenden Mailverbindungen. Bei einem defekten Limiter wird mit 503 abgebrochen, bevor der Mailserver angesprochen wird. Ein gültiger API-Key ersetzt nicht die Mail-Anmeldedaten.
+Die Reihenfolge ist HTTPS/Methode → Config-Prüfung ohne Netzwerk → IP-Limiter und Bearer-Verifikation → JSON/Postfach-Whitelist → Mail-Anmeldelimiter → IMAP/SMTP. Ohne gültigen Bearer-Token gibt es keine ausgehenden Mailverbindungen. Bei einem schon zu Beginn defekten Limiter wird mit 503 vor dem Mailzugriff abgebrochen. Scheitert erst die abschließende Zähleraktualisierung, kann eine Lese-/Änderungsoperation bereits ausgeführt sein; bestätigte SMTP-Annahme bleibt dennoch `sent:true`. Ein gültiger API-Key ersetzt nicht die Mail-Anmeldedaten.
 
 Das IP-Limit und die temporäre Sperre helfen gegen einzelne missbräuchliche Clients, garantieren aber keinen DDoS-Schutz. Bereits TLS-Verbindungen, PHP-Prozesse und die bcrypt-Verifikation beanspruchen Ressourcen; viele verschiedene Quell-IP-Adressen umgehen ein reines Limit pro IP. Für größere Angriffe muss der Hoster bzw. ein vorgeschalteter Reverse Proxy/WAF Verbindungen und Anfragen begrenzen, bevor PHP erreicht wird. Bei Proxys `REMOTE_ADDR` ausschließlich aus vertrauenswürdiger Infrastruktur ableiten. Das Projekt verändert keine globale Firewall- oder Hosting-Konfiguration.
 
@@ -201,6 +229,14 @@ composer check-platform-reqs --no-dev
 php bin/check.php
 composer analyse # PHPStan Level 6 für public/, bin/, tests/ und Beispielconfig
 composer test     # Funktions-, Authentifizierungs-, IMAP- und SMTP-Tests; CLI pcntl/posix erforderlich
+```
+
+Die OpenAPI wird in einem eigenen CI-Job mit `openapi-spec-validator` validiert; die Anfrage- und Antwortbeispiele werden gegen ihre Schemas geprüft. Dafür benötigt nur die Entwicklung Python, nicht das PHP-Webhosting. Lokal optional:
+
+```bash
+python3 -m venv /tmp/imapi-openapi-validation
+/tmp/imapi-openapi-validation/bin/pip install openapi-spec-validator==0.7.2
+/tmp/imapi-openapi-validation/bin/python tests/openapi.py
 ```
 
 `composer check` führt Composer-Validierung, PHPStan und alle PHP-Tests zusammen aus; `composer test` nur die Tests. Die GitHub-Actions-CI führt die Analyse und Tests bei jedem Push und Pull Request unter PHP 8.2, 8.3, 8.4 und 8.5 aus. PHPStan ist ausschließlich eine Entwicklungsabhängigkeit und wird beim Produktionsdeployment mit `composer install --no-dev` nicht installiert. Die Analyse verwendet keine Baseline und keine unterdrückten Fehler. Der lokale Analysecache wird nicht versioniert.
