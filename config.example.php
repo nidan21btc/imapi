@@ -9,6 +9,8 @@ return [
     'local_only' => false, // true pins IMAP/SMTP to 127.0.0.1, TLS still verifies mail_host
     'smtp_port' => 465, // 465 = implicit TLS, 587 = required STARTTLS
     'allowed_mailboxes' => ['*@sann.gmbh'], // [] permits all accounts on this fixed server
+    'allowed_recipient_domains' => [], // Fail closed: set allowed domains before sending
+    'allowed_recipient_domains_by_mailbox' => [], // Optional full-mailbox => domain-list replacement; [] blocks that mailbox
     'sent_folder' => 'Sent', // Exact UTF-8 path; per-request sent_folder overrides this
     'create_sent_folder_if_missing' => true, // Only configured sent_folder; prepare before SMTP
     'state_dir' => __DIR__ . '/rate-limit', // Private, writable by PHP; local filesystem

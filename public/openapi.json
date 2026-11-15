@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "imapi",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "HTTPS IMAP/SMTP gateway. A single POST / operation dispatches seven JSON actions. All three security credentials are required together on every API request. No client-selected mail host. The public static OpenAPI document contains no secrets and performs no mail operations. No automatic send retries or idempotency keys. Default limits: 60 requests/minute/IP network, 20 MiB JSON, 12 MiB MIME, 32 MiB body enrichment per listing; deployment config can override sizes. PHP validates string limits in UTF-8 bytes. Proxy/hosting errors may be non-JSON.",
     "license": {
       "name": "MIT",
@@ -118,7 +118,7 @@
                   "value": {
                     "action": "send",
                     "to": [
-                      "recipient@example.org"
+                      "recipient@sann.gmbh"
                     ],
                     "subject": "Hello",
                     "text": "Hello!",
@@ -382,17 +382,30 @@
             }
           },
           "403": {
-            "description": "Mailbox forbidden or IMAP/SMTP authentication failed. Codes: mailbox_forbidden, mail_auth_failed.",
+            "description": "Mailbox forbidden, IMAP/SMTP authentication failed, or at least one to/cc/bcc/reply_to domain is not permitted. recipient_not_allowed rejects the whole send before any mail connection. Codes: mailbox_forbidden, mail_auth_failed, recipient_not_allowed.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
                 },
-                "example": {
-                  "ok": false,
-                  "error": {
-                    "code": "mail_auth_failed",
-                    "message": "Anfrage konnte nicht ausgeführt werden."
+                "examples": {
+                  "mail_auth_failed": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "mail_auth_failed",
+                        "message": "Mail-Anmeldung fehlgeschlagen."
+                      }
+                    }
+                  },
+                  "recipient_not_allowed": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "recipient_not_allowed",
+                        "message": "Empfängerdomain nicht erlaubt: foreign.example; nichts versendet."
+                      }
+                    }
                   }
                 }
               }
@@ -618,7 +631,7 @@
       },
       "Email": {
         "type": "string",
-        "description": "Bare email address without display name; at most 254 bytes.",
+        "description": "Bare email address without display name, at most 254 input and normalized bytes. IDN domains are normalized to lowercase UTS-46 nontransitional ASCII/Punycode; Unicode local parts are not supported.",
         "format": "email",
         "maxLength": 254
       },
@@ -867,7 +880,7 @@
           },
           "sent_folder": {
             "type": "string",
-            "description": "Omit to use private config (default Sent). null or empty string skips IMAP entirely. An alternate folder must exist; only the configured folder may be created automatically. At most 1024 UTF-8 bytes.",
+            "description": "Omit to use private config (default Sent). null or empty string skips IMAP entirely. An alternate folder must exist; only the configured folder may be created automatically. At most 1024 UTF-8 bytes. Production uses the exact configured path INBOX.Gesendet; namespace prefixes are not guessed.",
             "nullable": true,
             "maxLength": 1024
           }
@@ -878,7 +891,7 @@
           "subject",
           "text"
         ],
-        "description": "From/envelope sender are always the authenticated mailbox; Bcc is absent from MIME headers. Before SMTP, prepare the configured Sent folder; failure prevents SMTP. Once SMTP accepts DATA, return ok=true/sent=true even if APPEND fails. Never automatically retry a successful send or smtp_status_unknown. No idempotency key or automatic retries. A partial recipient rejection can yield sent=true with smtp_warning; do not resend the whole message."
+        "description": "All to, cc, bcc and reply_to domains must be explicitly allowed by private configuration before any IMAP/SMTP connection. Compare exact normalized domain, case-insensitively; subdomains and suffix matches are not automatically allowed. Unicode IDNs and Punycode normalize to the same UTS-46 nontransitional ASCII domain. Any disallowed domain rejects the entire request with HTTP 403 recipient_not_allowed, reporting that domain and sending nothing. A missing/empty effective allowlist blocks sending. Optional per-mailbox lists replace the global list. From/envelope sender are always the authenticated mailbox; Bcc is absent from MIME headers. Before SMTP, prepare the configured Sent folder; failure prevents SMTP. Once SMTP accepts DATA, return ok=true/sent=true even if APPEND fails. Never automatically retry a successful send or smtp_status_unknown. No idempotency key or automatic retries. A partial recipient rejection can yield sent=true with smtp_warning; do not resend the whole message."
       },
       "FlagRequest": {
         "type": "object",

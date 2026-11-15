@@ -17,11 +17,12 @@
         "ext-openssl": "*",
         "ext-iconv": "*",
         "ext-dom": "*",
-        "ext-fileinfo": "*"
+        "ext-fileinfo": "*",
+        "ext-intl": "*"
     },
     "scripts": {
         "analyse": "phpstan analyse --no-progress --memory-limit=512M",
-        "test": ["@php tests/run.php", "@php tests/security.php", "@php tests/auth.php", "@php tests/imap-auth.php", "@php tests/imap.php", "@php tests/smtp.php"],
+        "test": ["@php tests/run.php", "@php tests/security.php", "@php tests/auth.php", "@php tests/imap-auth.php", "@php tests/imap.php", "@php tests/smtp.php", "@php tests/send.php"],
         "check": ["@composer validate --strict", "@analyse", "@test"]
     },
     "config": {

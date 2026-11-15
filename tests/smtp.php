@@ -39,6 +39,7 @@ if ($pid === 0) {
 }
 fclose($socket);
 $c = require __DIR__ . '/../config.example.php';
+$c['allowed_recipient_domains'] = ['example.org'];
 $request = ['to' => ['recipient@example.org', 'second@example.org'], 'subject' => 'Fixture', 'text' => 'Fixture body'];
 /** @param array<string, mixed> $c
  *  @param array<string, mixed> $request

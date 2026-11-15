@@ -35,6 +35,7 @@ namespace {
     $dir = sys_get_temp_dir() . '/imapi-auth-' . bin2hex(random_bytes(6));
     mkdir($dir, 0700);
     $c = require __DIR__ . '/../config.example.php';
+    $c['allowed_recipient_domains'] = ['example.org'];
     $c['api_key_hash'] = password_hash(bin2hex(random_bytes(32)), PASSWORD_BCRYPT);
     $c['state_dir'] = $dir;
     $path = $dir . '/config.php';

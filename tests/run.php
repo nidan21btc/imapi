@@ -16,6 +16,7 @@ function rejects(callable $f, int $status): void {
 }
 
 $c = require __DIR__ . '/../config.example.php';
+$c['allowed_recipient_domains'] = ['example.com'];
 check(allowedMailbox('user@sann.gmbh', $c['allowed_mailboxes']), 'whitelist domain');
 check(allowedMailbox('User@SANN.GMBH', $c['allowed_mailboxes']), 'case insensitive domain');
 check(!allowedMailbox('user@evil-sann.gmbh', $c['allowed_mailboxes']), 'domain suffix bypass');

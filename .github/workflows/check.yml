@@ -22,7 +22,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '${{ matrix.php }}'
-          extensions: mbstring, openssl, iconv, dom, fileinfo, zip, pcntl, posix
+          extensions: mbstring, openssl, iconv, dom, fileinfo, zip, intl, pcntl, posix
           coverage: none
       - run: composer install --no-interaction --prefer-dist
       - run: composer validate --strict

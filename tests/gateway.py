@@ -57,6 +57,6 @@ request(body={'action': 'flag', 'uid': 42, 'seen': 'false'}, code='invalid_param
 request(body={'action': 'flag', 'uid': 42}, code='invalid_parameter')
 request(body={'action': 'create_folder', 'folder': ''}, code='invalid_parameter')
 request(body={'action': 'create_folder', 'folder': 'Archiv//2026'}, code='invalid_parameter')
-request(body={'action': 'send', 'to': 'a@example.org', 'subject': 'Test', 'text': 'Test', 'sent_folder': False}, code='invalid_parameter')
-request(body={'action': 'send', 'to': 'a@example.org', 'subject': 'Test\r\nBcc: bad@example.org', 'text': 'Test'}, code='invalid_parameter')
+request(body={'action': 'send', 'to': 'a@foreign.example', 'subject': 'Test', 'text': 'Test'}, status=403, code='recipient_not_allowed')
+request(body={'action': 'send', 'to': [], 'subject': 'Test', 'text': 'Test'}, code='invalid_parameter')
 print(f'{count} HTTPS/HTTP gateway checks passed; no real mailbox accessed.')

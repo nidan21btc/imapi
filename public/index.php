@@ -521,17 +521,67 @@ function recipients(array $p, string $field, bool $required = false): array {
     if (!is_array($list) || !array_is_list($list) || count($list) > 50 || ($required && !$list)) {
         fail(400, 'invalid_parameter', "Ungültiger Parameter: $field.");
     }
-    foreach ($list as $email) {
-        if (!is_string($email) || strlen($email) > 254 || !filter_var($email, FILTER_VALIDATE_EMAIL)
-            || preg_match('/[\r\n]/', $email)) { fail(400, 'invalid_parameter', "Ungültiger Parameter: $field."); }
+    foreach ($list as &$email) {
+        if (!is_string($email) || strlen($email) > 254 || preg_match('/[\r\n\x00]/', $email)
+            || ($at = strrpos($email, '@')) === false) { fail(400, 'invalid_parameter', "Ungültiger Parameter: $field."); }
+        $domain = recipientDomain(substr($email, $at + 1));
+        if ($domain === null) { fail(400, 'invalid_parameter', "Ungültiger Parameter: $field."); }
+        $email = substr($email, 0, $at + 1) . $domain;
+        if (strlen($email) > 254 || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            fail(400, 'invalid_parameter', "Ungültiger Parameter: $field.");
+        }
     }
+    unset($email);
     return $list;
+}
+function recipientDomain(string $domain): ?string {
+    if (!function_exists('idn_to_ascii')) { fail(503, 'configuration_error', 'PHP intl ist für die Empfängerprüfung erforderlich.'); }
+    $ascii = idn_to_ascii($domain, IDNA_USE_STD3_RULES | IDNA_CHECK_BIDI | IDNA_CHECK_CONTEXTJ
+        | IDNA_NONTRANSITIONAL_TO_ASCII, INTL_IDNA_VARIANT_UTS46);
+    if ($ascii === false || str_ends_with($ascii, '.') || !filter_var($ascii, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME)) { return null; }
+    return strtolower($ascii);
+}
+/**
+ * @param array<string, mixed> $c
+ * @param array<string, list<string>> $addresses
+ */
+function checkRecipientDomains(array $c, string $user, array $addresses): void {
+    $domains = $c['allowed_recipient_domains'] ?? [];
+    $overrides = $c['allowed_recipient_domains_by_mailbox'] ?? [];
+    if (!is_array($overrides)) { fail(503, 'configuration_error', 'Ungültige Empfängerfreigabe.'); }
+    $matched = false;
+    foreach ($overrides as $mailbox => $override) {
+        if (!is_string($mailbox)) { fail(503, 'configuration_error', 'Ungültige Empfängerfreigabe.'); }
+        if (strcasecmp($mailbox, $user) === 0) {
+            if ($matched) { fail(503, 'configuration_error', 'Mehrdeutige Empfängerfreigabe.'); }
+            $matched = true; $domains = $override;
+        }
+    }
+    if (!is_array($domains) || !array_is_list($domains)) { fail(503, 'configuration_error', 'Ungültige Empfängerfreigabe.'); }
+    $allowed = [];
+    foreach ($domains as $domain) {
+        if (!is_string($domain) || ($ascii = recipientDomain($domain)) === null) {
+            fail(503, 'configuration_error', 'Ungültige Empfängerfreigabe.');
+        }
+        $allowed[] = $ascii;
+    }
+    foreach ($addresses as $list) {
+        foreach ($list as $email) {
+            $domain = substr($email, strrpos($email, '@') + 1);
+            if (!in_array($domain, $allowed, true)) {
+                fail(403, 'recipient_not_allowed', 'Empfängerdomain nicht erlaubt: ' . $domain . '; nichts versendet.');
+            }
+        }
+    }
 }
 /**
  * @param array<string, mixed> $p
  * @param array<string, mixed> $c
  */
 function buildMail(array $p, array $c, string $user, #[SensitiveParameter] string $password): PHPMailer {
+    $addresses = [];
+    foreach (['to', 'cc', 'bcc', 'reply_to'] as $field) { $addresses[$field] = recipients($p, $field, $field === 'to'); }
+    checkRecipientDomains($c, $user, $addresses);
     $transport = mailTransport($c);
     $mail = new PHPMailer(true);
     $mail->setSMTPInstance(new TrackedSMTP());
@@ -548,7 +598,7 @@ function buildMail(array $p, array $c, string $user, #[SensitiveParameter] strin
     $mail->CharSet = 'UTF-8';
     $mail->setFrom($user);
     foreach (['to' => 'addAddress', 'cc' => 'addCC', 'bcc' => 'addBCC', 'reply_to' => 'addReplyTo'] as $field => $method) {
-        foreach (recipients($p, $field, $field === 'to') as $email) { $mail->$method($email); }
+        foreach ($addresses[$field] as $email) { $mail->$method($email); }
     }
     $mail->Subject = lineparam($p, 'subject', null, 998);
     $text = strparam($p, 'text', null, $c['max_message_bytes']);
