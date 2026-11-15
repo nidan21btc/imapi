@@ -25,6 +25,27 @@ rejects(fn() => boolparam(['seen' => 'false'], 'seen'), 400);
 rejects(fn() => intparam(['uid' => '42'], 'uid', 1, 100), 400);
 rejects(fn() => lineparam(['subject' => "Hello\r\nBcc: evil@test.example"], 'subject'), 400);
 rejects(fn() => recipients(['to' => ['a@example.com', "b@example.com\r\nX: y"]], 'to'), 400);
+check(mailHost($c) === 'cloud3-vm338.de-nserver.de', 'mail host explicitly allowed');
+rejects(fn() => mailHost(array_replace($c, ['mail_host' => 'evil.example.org'])), 503);
+rejects(fn() => connectMailbox(array_replace($c, ['mail_host' => 'evil.example.org']), 'fixture@sann.gmbh', 'fixture-only'), 503);
+rejects(fn() => mailHost(array_replace($c, ['allowed_mail_hosts' => []])), 503);
+$local = mailTransport(array_replace($c, ['local_only' => true]));
+check($local['host'] === '127.0.0.1', 'local-only transport is pinned to IPv4 loopback');
+check($local['ssl'] === ['peer_name' => $c['mail_host'], 'verify_peer' => true, 'verify_peer_name' => true,
+    'allow_self_signed' => false, 'SNI_enabled' => true], 'local-only retains hostname and certificate verification');
+rejects(fn() => mailTransport(array_replace($c, ['local_only' => 'true'])), 503);
+rejects(fn() => mailTransport(array_replace($c, ['local_only' => true, 'mail_host' => 'evil.example.org'])), 503);
+foreach (['', ' ', "Bad\r\nCREATE Foo", 'Archiv//2026', '/Archiv', 'Archiv/', 'Archiv/../2026', 'Bad*', 'Bad%', 'Bad\\Name', 'Archiv/ 2026'] as $invalid) {
+    rejects(fn() => validateFolderName($invalid), 400);
+}
+check(validateFolderName('Archiv/2026') === 'Archiv/2026', 'portable folder hierarchy');
+check(validateFolderName('Gesendet') === 'Gesendet', 'simple folder');
+check(sentFolder([], []) === 'Sent', 'default sent folder');
+check(sentFolder([], ['sent_folder' => 'Gesendet']) === 'Gesendet', 'configured sent folder');
+check(sentFolder(['sent_folder' => 'Archiv'], $c) === 'Archiv', 'per-request sent folder');
+check(sentFolder(['sent_folder' => null], $c) === null, 'null skips sent copy');
+check(sentFolder(['sent_folder' => ''], $c) === null, 'empty string skips sent copy');
+rejects(fn() => sentFolder(['sent_folder' => false], $c), 400);
 
 $request = ['to' => ['to@example.com'], 'bcc' => ['hidden@example.com'], 'subject' => 'Grüße', 'text' => 'Hallo Welt',
     'html' => '<p>Hallo Welt</p>', 'in_reply_to' => '<original@example.com>',

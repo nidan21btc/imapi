@@ -21,12 +21,26 @@ if ($pid === 0) {
     fwrite($peer, "* OK fixture ready\r\n");
     $seen = false;
     $peekReads = 0;
+    $createdFolders = [];
+    $subscriptions = 0;
     while (($line = fgets($peer)) !== false) {
         if (!preg_match('/^(\S+) (.+)\r\n$/', $line, $match)) { exit(3); }
         [$unused, $tag, $command] = $match;
         if (str_starts_with($command, 'CAPABILITY')) { fwrite($peer, "* CAPABILITY IMAP4rev1 MOVE UIDPLUS\r\n"); }
         elseif (str_starts_with($command, 'LOGIN ')) { /* Only synthetic credentials. */ }
         elseif ($command === 'NOOP') { /* Connection health check. */ }
+        elseif (str_starts_with($command, 'LIST ')) {
+            if ($command === 'LIST "" ""') { fwrite($peer, '* LIST (\\Noselect) "." ""' . "\r\n"); }
+            else {
+                fwrite($peer, '* LIST (\\HasNoChildren) "." "INBOX"' . "\r\n");
+                foreach ($createdFolders as $name) { fwrite($peer, '* LIST (\\HasNoChildren) "." "' . $name . '"' . "\r\n"); }
+            }
+        } elseif (str_starts_with($command, 'CREATE ')) {
+            $name = trim(substr($command, 7), '"');
+            if ($name !== 'Archiv.2026' && $name !== 'Gr&APwA3w-e') { exit(9); }
+            if (in_array($name, $createdFolders, true)) { exit(10); }
+            $createdFolders[] = $name;
+        } elseif (str_starts_with($command, 'SUBSCRIBE ')) { $subscriptions++; }
         elseif (str_starts_with($command, 'SELECT ')) {
             fwrite($peer, "* FLAGS (\\Seen \\Flagged)\r\n* 1 EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 1]\r\n* OK [UIDNEXT 43]\r\n");
         } elseif (str_starts_with($command, 'UID FETCH ')) {
@@ -44,7 +58,7 @@ if ($pid === 0) {
         } elseif ($command === 'LOGOUT') {
             fwrite($peer, "* BYE closing\r\n$tag OK LOGOUT complete\r\n");
             fclose($peer); fclose($socket);
-            exit($peekReads === 2 && $seen ? 0 : 6);
+            exit($peekReads === 2 && $seen && count($createdFolders) === 2 && $subscriptions === 4 ? 0 : 6);
         } else { fwrite(STDERR, "Unexpected command in fixture: $command\n"); exit(7); }
         fwrite($peer, "$tag OK completed\r\n");
     }
@@ -65,10 +79,20 @@ try {
     $m = loadMessage($client, $folder, 42, 1024 * 1024, true);
     if ($m->hasFlag('Seen')) { throw new RuntimeException('Reading changed Seen flag.'); }
     if (!$m->setFlag('Seen')) { throw new RuntimeException('Explicit mark_seen failed.'); }
+    $existing = createMailFolder($client, 'INBOX');
+    if ($existing !== ['folder' => 'INBOX', 'created' => false]) { throw new RuntimeException('Existing folder must return created=false.'); }
+    $created = createMailFolder($client, 'Archiv/2026');
+    if ($created !== ['folder' => 'Archiv.2026', 'created' => true]) { throw new RuntimeException('Native hierarchy delimiter was not used.'); }
+    if (createMailFolder($client, 'Archiv/2026')['created'] !== false) { throw new RuntimeException('Repeated create must be idempotent.'); }
+    if (!createMailFolder($client, 'Grüße')['created']) { throw new RuntimeException('UTF-7 folder creation failed.'); }
+    foreach (['Archiv..2026', 'Archiv.2026/Mixed'] as $invalid) {
+        try { createMailFolder($client, $invalid); throw new RuntimeException('Invalid separator accepted.'); }
+        catch (ApiError $e) { if ($e->status !== 400) { throw $e; } }
+    }
     $client->disconnect();
     pcntl_waitpid($pid, $status);
     if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) { throw new RuntimeException('Unexpected protocol operation.'); }
-    echo "IMAP wire fixture passed: PEEK, UTF-8, explicit Seen, no implicit flag writes.\n";
+    echo "IMAP wire fixture passed: PEEK, UTF-8, explicit Seen, CREATE/SUBSCRIBE, existing folders and delimiter validation; no EXPUNGE.\n";
 } catch (Throwable $e) {
     posix_kill($pid, SIGTERM);
     pcntl_waitpid($pid, $status);

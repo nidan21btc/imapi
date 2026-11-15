@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\SMTP;
 use Webklex\PHPIMAP\Client;
 use Webklex\PHPIMAP\ClientManager;
 use Webklex\PHPIMAP\Connection\Protocols\ImapProtocol;
@@ -17,6 +18,20 @@ require __DIR__ . '/../vendor/autoload.php';
 final class ApiError extends RuntimeException {
     public function __construct(public int $status, public string $errorCode, string $message) {
         parent::__construct($message);
+    }
+}
+
+// A later recipient/QUIT error must never turn an accepted DATA into a failed send.
+final class TrackedSMTP extends SMTP {
+    public bool $accepted = false;
+    public bool $dataStarted = false;
+    public int $dataFailureCode = 0;
+
+    public function data($msg_data): bool {
+        $this->dataStarted = true;
+        $this->accepted = parent::data($msg_data);
+        if (!$this->accepted) { $this->dataFailureCode = (int)($this->getError()['smtp_code'] ?? 0); }
+        return $this->accepted;
     }
 }
 
@@ -73,6 +88,8 @@ function config(): array {
         || empty($c['state_dir']) || empty($c['mail_host']) || !in_array($c['smtp_port'] ?? 0, [465, 587], true)) {
         fail(503, 'configuration_error', 'Serverkonfiguration unvollständig.');
     }
+    $c += ['sent_folder' => 'Sent', 'allowed_mail_hosts' => ['cloud3-vm338.de-nserver.de'], 'local_only' => false];
+    mailTransport($c);
     $root = realpath(__DIR__) . DIRECTORY_SEPARATOR;
     foreach ([$path, $c['state_dir']] as $private) {
         // State directory must already exist, so containment checks cannot be bypassed by '..'.
@@ -82,6 +99,31 @@ function config(): array {
         }
     }
     return $c;
+}
+/** @param array<string, mixed> $c */
+function mailHost(array $c): string {
+    $host = $c['mail_host'] ?? null;
+    $allowed = $c['allowed_mail_hosts'] ?? ['cloud3-vm338.de-nserver.de'];
+    if (!is_string($host) || !is_array($allowed) || !array_is_list($allowed)
+        || !filter_var($host, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME)) {
+        fail(503, 'mail_server_forbidden', 'Mailserver nicht freigegeben.');
+    }
+    foreach ($allowed as $entry) {
+        if (is_string($entry) && strcasecmp($host, $entry) === 0) { return $host; }
+    }
+    fail(503, 'mail_server_forbidden', 'Mailserver nicht freigegeben.');
+}
+/**
+ * @param array<string, mixed> $c
+ * @return array{host: string, ssl: array{peer_name: string, verify_peer: true, verify_peer_name: true, allow_self_signed: false, SNI_enabled: true}}
+ */
+function mailTransport(array $c): array {
+    $host = mailHost($c);
+    $localOnly = $c['local_only'] ?? false;
+    if (!is_bool($localOnly)) { fail(503, 'configuration_error', 'local_only muss ein boolescher Wert sein.'); }
+    return ['host' => $localOnly ? '127.0.0.1' : $host,
+        'ssl' => ['peer_name' => $host, 'verify_peer' => true, 'verify_peer_name' => true,
+            'allow_self_signed' => false, 'SNI_enabled' => true]];
 }
 /**
  * @param array<string, mixed> $c
@@ -138,8 +180,9 @@ function imapOptions(): array {
 }
 /** @param array<string, mixed> $c */
 function connectMailbox(array $c, string $user, #[SensitiveParameter] string $password): Client {
+    $transport = mailTransport($c);
     $client = (new ClientManager(imapOptions()))->make([
-        'host' => $c['mail_host'], 'port' => 993, 'encryption' => 'ssl', 'validate_cert' => true,
+        'host' => $transport['host'], 'ssl_options' => $transport['ssl'], 'port' => 993, 'encryption' => 'ssl', 'validate_cert' => true,
         'protocol' => 'imap', 'username' => $user, 'password' => $password, 'timeout' => 20,
     ]);
     $client->connect();
@@ -157,6 +200,95 @@ function imapConnection(Client $client): ImapProtocol {
         fail(503, 'configuration_error', 'Webklex-IMAP-Protokollzugriff ist erforderlich.');
     }
     return $connection;
+}
+function validateFolderName(string $name): string {
+    if ($name === '' || strlen($name) > 1024 || !mb_check_encoding($name, 'UTF-8') || trim($name) !== $name
+        || preg_match('/[\p{C}\\\\*%"]|^#|^\/|\/$|\/\//u', $name)) {
+        fail(400, 'invalid_parameter', 'Ungültiger Ordnerpfad.');
+    }
+    foreach (explode('/', $name) as $part) {
+        if ($part === '.' || $part === '..' || trim($part) !== $part) { fail(400, 'invalid_parameter', 'Ungültiger Ordnerpfad.'); }
+    }
+    return $name;
+}
+/** @return array{folder: string, created: bool} */
+function createMailFolder(Client $client, string $name): array {
+    validateFolderName($name);
+    $connection = imapConnection($client);
+    $roots = $connection->folders('', '')->validatedData();
+    if (!isset($roots['']) || !array_key_exists('delimiter', $roots[''])) {
+        fail(502, 'folder_create_failed', 'Ordnertrennzeichen konnte nicht ermittelt werden.');
+    }
+    $delimiter = $roots['']['delimiter'];
+    // Accept '/' as portable hierarchy notation, or the server's actual separator.
+    if ($delimiter === null || $delimiter === '') {
+        if (str_contains($name, '/')) { fail(400, 'invalid_parameter', 'Mailserver unterstützt keine Unterordner.'); }
+    } elseif (is_string($delimiter)) {
+        if ($delimiter !== '/' && str_contains($name, '/')) {
+            if (str_contains($name, $delimiter)) { fail(400, 'invalid_parameter', 'Gemischte Ordnertrennzeichen sind unzulässig.'); }
+            $name = str_replace('/', $delimiter, $name);
+        }
+        foreach (explode($delimiter, $name) as $part) {
+            if ($part === '' || $part === '.' || $part === '..' || trim($part) !== $part) {
+                fail(400, 'invalid_parameter', 'Ungültige Ordnertrennzeichen.');
+            }
+        }
+    } else { fail(502, 'folder_create_failed', 'Ungültiges Ordnertrennzeichen des Mailservers.'); }
+    $wireName = mb_convert_encoding($name, 'UTF7-IMAP', 'UTF-8');
+    $created = false;
+    if (!$client->getFolderByPath($name)) {
+        try {
+            $connection->createFolder($wireName)->validatedData();
+            $created = true;
+        } catch (\Webklex\PHPIMAP\Exceptions\ImapServerErrorException) {
+            // A concurrent caller may have created the folder after our LIST.
+            $current = $connection->folders('', $wireName)->validatedData();
+            if (!isset($current[$wireName])) { fail(502, 'folder_create_failed', 'Ordner konnte nicht angelegt werden.'); }
+        }
+    }
+    try { $connection->subscribeFolder($wireName)->validatedData(); }
+    catch (Throwable) { fail(502, 'folder_subscribe_failed', 'Ordner vorhanden, Abonnieren fehlgeschlagen. Erneuter Aufruf ist möglich.'); }
+    return ['folder' => $name, 'created' => $created];
+}
+/** @param array<string, mixed> $p
+ *  @param array<string, mixed> $c
+ */
+function sentFolder(array $p, array $c): ?string {
+    $value = array_key_exists('sent_folder', $p) ? $p['sent_folder'] : ($c['sent_folder'] ?? 'Sent');
+    if ($value === null || $value === '') { return null; }
+    if (!is_string($value)) { fail(400, 'invalid_parameter', 'Ungültiger Parameter: sent_folder.'); }
+    return validateFolderName($value);
+}
+/**
+ * @param callable(string, string): void $saveCopy
+ * @return array<string, mixed>
+ */
+function deliverMessage(PHPMailer $mail, ?string $folder, callable $saveCopy): array {
+    $smtp = $mail->getSMTPInstance();
+    if (!$smtp instanceof TrackedSMTP) { fail(503, 'configuration_error', 'SMTP-Statusprüfung nicht verfügbar.'); }
+    $sendError = false;
+    try { $sendError = !$mail->postSend(); }
+    catch (Throwable) { $sendError = true; }
+    if (!$smtp->accepted) {
+        $code = (int)($smtp->getError()['smtp_code'] ?? 0);
+        if (in_array($code, [534, 535], true)) { fail(403, 'mail_auth_failed', 'Mail-Anmeldung fehlgeschlagen; nichts versendet.'); }
+        if ($smtp->dataStarted && $smtp->dataFailureCode < 400) {
+            fail(502, 'smtp_status_unknown', 'SMTP-Bestätigung fehlt; Zustellstatus unklar. Vor erneutem Versand prüfen.');
+        }
+        fail(502, 'smtp_failed', 'SMTP hat die Nachricht nicht angenommen; nichts versendet.');
+    }
+    $result = ['sent' => true, 'message_id' => $mail->getLastMessageID(), 'saved_to_sent' => false];
+    if ($sendError) { $result['smtp_warning'] = 'SMTP hat die Nachricht angenommen; weitere Empfänger- oder Abschlussfehler. Nicht erneut senden.'; }
+    if ($folder !== null) {
+        try {
+            $saveCopy($folder, $mail->getSentMIMEMessage());
+            $result['saved_to_sent'] = true;
+        } catch (ApiError $e) {
+            $result['sent_folder_error'] = $e->errorCode === 'folder_not_found' ? 'Ordner nicht gefunden' : 'Ablage im Gesendet-Ordner fehlgeschlagen';
+        } catch (Throwable) { $result['sent_folder_error'] = 'Ablage im Gesendet-Ordner fehlgeschlagen'; }
+        if (!$result['saved_to_sent']) { $result['warning'] = 'sent_copy_failed'; }
+    }
+    return $result;
 }
 function loadMessage(Client $client, Folder $folder, int $uid, int $maxBytes, bool $body): Message {
     $client->openFolder($folder->path);
@@ -231,9 +363,12 @@ function recipients(array $p, string $field, bool $required = false): array {
  * @param array<string, mixed> $c
  */
 function buildMail(array $p, array $c, string $user, #[SensitiveParameter] string $password): PHPMailer {
+    $transport = mailTransport($c);
     $mail = new PHPMailer(true);
+    $mail->setSMTPInstance(new TrackedSMTP());
     $mail->isSMTP();
-    $mail->Host = $c['mail_host'];
+    $mail->Host = $transport['host'];
+    $mail->SMTPOptions = ['ssl' => $transport['ssl']];
     $mail->Port = $c['smtp_port'];
     $mail->SMTPSecure = $mail->Port === 465 ? PHPMailer::ENCRYPTION_SMTPS : PHPMailer::ENCRYPTION_STARTTLS;
     $mail->SMTPAuth = true;
@@ -291,8 +426,9 @@ function buildMail(array $p, array $c, string $user, #[SensitiveParameter] strin
  */
 function dispatch(array $p, array $c, string $user, #[SensitiveParameter] string $password): array {
     $action = lineparam($p, 'action', null, 32);
-    if (!in_array($action, ['folders', 'list', 'get', 'attachment', 'send', 'flag'], true)) { fail(400, 'invalid_action', 'Unbekannte Aktion.'); }
-    $name = lineparam($p, 'folder', 'INBOX');
+    if (!in_array($action, ['folders', 'create_folder', 'list', 'get', 'attachment', 'send', 'flag'], true)) { fail(400, 'invalid_action', 'Unbekannte Aktion.'); }
+    $name = lineparam($p, 'folder', $action === 'create_folder' ? null : 'INBOX');
+    if ($action === 'create_folder') { validateFolderName($name); }
     $uid = in_array($action, ['get', 'attachment', 'flag'], true) ? intparam($p, 'uid', 1, 4294967295) : 0;
     $limit = $action === 'list' ? intparam($p, 'limit', 1, 100, 20) : 0;
     $since = $action === 'list' ? lineparam($p, 'since', '') : '';
@@ -309,6 +445,14 @@ function dispatch(array $p, array $c, string $user, #[SensitiveParameter] string
         if (isset($p['move_to'])) { lineparam($p, 'move_to'); }
     }
     $mail = $action === 'send' ? buildMail($p, $c, $user, $password) : null;
+    if ($mail !== null) {
+        $sentFolder = sentFolder($p, $c);
+        return deliverMessage($mail, $sentFolder, static function (string $folder, string $mime) use ($c, $user, $password): void {
+            $client = connectMailbox($c, $user, $password);
+            try { getFolder($client, $folder)->appendMessage($mime, ['\\Seen']); }
+            finally { try { $client->disconnect(); } catch (Throwable) { /* Keep accepted SMTP result. */ } }
+        });
+    }
     $client = connectMailbox($c, $user, $password);
     try {
         if ($action === 'folders') {
@@ -316,21 +460,7 @@ function dispatch(array $p, array $c, string $user, #[SensitiveParameter] string
             foreach ($client->getFolders(false) as $f) { $out[] = ['path' => folderName($f), 'name' => $f->name, 'selectable' => !$f->no_select]; }
             return ['folders' => $out];
         }
-        if ($action === 'send') {
-            $sent = getFolder($client, $c['sent_folder']); // Fail before SMTP if configuration is wrong.
-            try { $mail->postSend(); }
-            catch (Throwable) {
-                $smtp = $mail->getSMTPInstance()->getError();
-                if (in_array((int)($smtp['smtp_code'] ?? 0), [534, 535], true)) { fail(403, 'mail_auth_failed', 'Mail-Anmeldung fehlgeschlagen.'); }
-                fail(502, 'smtp_failed', 'Versand fehlgeschlagen; bei unklarem Zustellstatus vor erneutem Versand prüfen.');
-            }
-            $result = ['sent' => true, 'message_id' => $mail->getLastMessageID(), 'saved_to_sent' => false];
-            try {
-                $sent->appendMessage($mail->getSentMIMEMessage(), ['\\Seen']);
-                $result['saved_to_sent'] = true;
-            } catch (Throwable) { $result['warning'] = 'sent_copy_failed'; }
-            return $result;
-        }
+        if ($action === 'create_folder') { return createMailFolder($client, $name); }
         $folder = getFolder($client, $name);
         if ($action === 'list') {
             $query = $folder->query()->all();
