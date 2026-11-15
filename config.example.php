@@ -15,6 +15,10 @@ return [
     'requests_per_minute' => 60,
     'failed_keys_before_block' => 5,
     'block_seconds' => 900,
+    'failed_mail_logins_before_block' => 5, // Per IP network; includes simultaneous attempts
+    'mail_auth_block_seconds' => 900,
+    'failed_mail_logins_per_mailbox' => 10, // Across IPs; short block to limit account lockout
+    'mailbox_auth_block_seconds' => 60,
     'max_request_bytes' => 20 * 1024 * 1024,
     'max_message_bytes' => 12 * 1024 * 1024,
     'max_list_bytes' => 32 * 1024 * 1024,

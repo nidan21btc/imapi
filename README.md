@@ -25,9 +25,9 @@ Kleine HTTPS-Schnittstelle für IMAP und SMTP, PHP **8.2 oder neuer**. Ein öffe
 7. API-Domain mit gültigem TLS-Zertifikat auf `public/` richten. Bei unveränderlichem `public_html` nur `index.php` dorthin kopieren und dessen Autoloader-Pfad auf das private `vendor/autoload.php` ändern. `IMAPI_CONFIG` als serverseitige Umgebungsvariable auf den absoluten Config-Pfad setzen. Ohne diese Variable wird `../private/config.php` relativ zum Einstiegspunkt verwendet. Config, Composer-Dateien, Tests und `vendor/` niemals öffentlich bereitstellen.
 8. Authorization-Header an PHP weiterreichen, unter Apache etwa mit `CGIPassAuth On` im VHost/Directory oder, falls vom Hoster unterstützt, `.htaccess` mit `SetEnvIf Authorization "(.+)" HTTP_AUTHORIZATION=$1`. Requests dürfen im Webserver, Proxy, CDN, WAF oder APM **nicht mit Headern oder Body aufgezeichnet** werden. Normale Access-Logs ohne diese Daten sind möglich. Zugangsdaten gehören ausschließlich in Header, niemals in URL/Querystring. PHP unterdrückt rohe Bibliotheksfehler und Fehlerlogs für diesen Einstiegspunkt.
 
-Die API prüft das serverseitige `HTTPS=on/1` und lehnt HTTP mit 426 ab. Hinter einem TLS-Proxy muss der Webserver diese Variable ausschließlich für einen vertrauenswürdigen Proxy setzen; vom Client gesendete Forwarded-Header werden nicht ausgewertet. Die IP für Rate-Limits ist `REMOTE_ADDR`: hinter einem Proxy muss der Webserver die echte IP vertrauenswürdig auflösen, sonst teilen alle Clients ein Limit.
+Die API prüft das serverseitige `HTTPS=on/1` und lehnt HTTP mit 426 ab. Clients müssen direkt HTTPS verwenden: Ein Redirect oder eine 426-Antwort kann bereits unverschlüsselt gesendete Header nicht schützen. HTTP-Prüfungen daher immer ohne Zugangsdaten ausführen. Wenn vom Hoster unterstützt, eingehende Klartextverbindungen für diese API bereits vor PHP ablehnen. Hinter einem TLS-Proxy muss der Webserver diese Variable ausschließlich für einen vertrauenswürdigen Proxy setzen; vom Client gesendete Forwarded-Header werden nicht ausgewertet. Die IP für Rate-Limits ist `REMOTE_ADDR`: hinter einem Proxy muss der Webserver die echte IP vertrauenswürdig auflösen, sonst teilen alle Clients ein Limit.
 
-Ausgehende Verbindungen vom Webhosting zu 993 und 465 bzw. 587 müssen erlaubt sein. Es ist kein Daemon, Framework, Datenbankserver oder Cronjob erforderlich. Rate-Limit-Dateien nutzen `flock` auf einem lokalen Dateisystem; für mehrere Webserver braucht es einen gemeinsamen atomaren Limiter. Alte Dateien werden gelegentlich bereinigt.
+Ausgehende Verbindungen vom Webhosting zu 993 und 465 bzw. 587 müssen erlaubt sein. Es ist kein Daemon, Framework, Datenbankserver oder Cronjob erforderlich. Rate-Limit-Dateien nutzen `flock` auf einem lokalen Dateisystem; für mehrere Webserver braucht es einen gemeinsamen atomaren Limiter. Der Limiter verwendet eine feste Anzahl begrenzter Statusdateien; abgelaufene Datensätze werden bei jedem Zugriff auf die jeweilige Datei bereinigt, auch bei ungültigen oder bereits gesperrten Anfragen.
 
 ## API und Beispiele
 
@@ -67,7 +67,7 @@ Diese Datei liegt nur vorübergehend **auf dem Client**, nicht auf dem API-Serve
    api '{"action":"list","folder":"INBOX","limit":20,"since":"2026-11-01","unseen_only":true}'
    ```
 
-   Standard: `folder=INBOX`, `limit=20` (1–100), kein Datumsfilter, `unseen_only=false`. `since` ist ein inklusives IMAP-Datum (`YYYY-MM-DD`, Kalendertag des Mailservers). `messages` enthält UID, Datum, Absender/Empfänger als `{email,name}`, Betreff, `seen`, `flagged`, `size` in Bytes und `attachment_count`. Für die genaue Anhangzahl werden die begrenzten Nachrichtenkörper mit PEEK gelesen. Eine übergroße Nachricht oder Liste liefert 413; dann `limit` reduzieren bzw. `since` setzen. UIDs gelten jeweils nur innerhalb des Ordners und seiner UIDVALIDITY; nach einem Server-Reset neu auflisten.
+   Standard: `folder=INBOX`, `limit=20` (1–100), kein Datumsfilter, `unseen_only=false`. `since` ist ein inklusives IMAP-Datum (`YYYY-MM-DD`, Kalendertag des Mailservers). `messages` enthält UID, Datum, Absender/Empfänger als `{email,name}`, Betreff, `seen`, `flagged`, `size` in Bytes und `attachment_count`. Für die genaue Anhangzahl werden Nachrichtenkörper innerhalb der Größenbudgets mit PEEK gelesen. Eine übergroße Mail bricht die Liste nicht ab: Header, UID und Größe bleiben sichtbar, `too_large:true`, `body_loaded:false` und `attachment_count:null` kennzeichnen die nicht geladene Mail. Reicht das gesamte Ladebudget nicht aus, bleiben auch die Header aller übrigen ausgewählten Mails sichtbar; deren `body_loaded` ist ebenfalls `false` und die Anhangzahl unbekannt (`null`, ausdrücklich nicht 0). Andere noch ins Budget passende Mails können weiterhin vollständig ausgewertet werden. Das Listenfeld `truncated:true` bedeutet, dass die MIME-/Anhang-Auswertung aus Größenlimitgründen unvollständig ist; es werden deshalb keine Header-Einträge entfernt. `get` und `attachment` behalten für zu große Nachrichten HTTP 413 bei. Zum Verschieben einer übergroßen Mail kann deren UID aus der Liste verwendet werden. UIDs gelten jeweils nur innerhalb des Ordners und seiner UIDVALIDITY; nach einem Server-Reset neu auflisten.
 
 3. Nachricht lesen, ohne sie als gelesen zu markieren:
 
@@ -144,13 +144,34 @@ Diese Datei liegt nur vorübergehend **auf dem Client**, nicht auf dem API-Serve
 
 Optional beschränkt **`local_only => true` ausschließlich ausgehende IMAP-/SMTP-Verbindungen** auf die feste IPv4-Loopback-Adresse `127.0.0.1`. Es gibt keinen DNS-Fallback auf andere Adressen. Host-Whitelist und feste Mailports gelten weiterhin. Der freigegebene `mail_host` bleibt der TLS-Peername und wird für SNI und die Zertifikatsprüfung verwendet; TLS wird auch lokal nicht abgeschaltet. Der Schalter setzt erreichbare Maildienste auf derselben Maschine voraus. Sind diese nicht verfügbar oder passt ihr Zertifikat nicht, scheitert die Verbindung geschlossen. Die eingehende HTTPS-Erreichbarkeit der API wird davon nicht verändert. Standard ist `false`.
 
-Die Reihenfolge ist HTTPS/Methode → Config-Prüfung ohne Netzwerk → IP-Limiter und Bearer-Verifikation → JSON/Postfach-Whitelist → IMAP/SMTP. Ohne gültigen Bearer-Token gibt es keine ausgehenden Mailverbindungen. Bei einem defekten Limiter wird mit 503 abgebrochen, bevor der Mailserver angesprochen wird. Ein gültiger API-Key ersetzt nicht die Mail-Anmeldedaten.
+Die Reihenfolge ist HTTPS/Methode → Config-Prüfung ohne Netzwerk → IP-Limiter und Bearer-Verifikation → JSON/Postfach-Whitelist → Mail-Anmeldelimiter → IMAP/SMTP. Ohne gültigen Bearer-Token gibt es keine ausgehenden Mailverbindungen. Bei einem defekten Limiter wird mit 503 abgebrochen, bevor der Mailserver angesprochen wird. Ein gültiger API-Key ersetzt nicht die Mail-Anmeldedaten.
 
 Das IP-Limit und die temporäre Sperre helfen gegen einzelne missbräuchliche Clients, garantieren aber keinen DDoS-Schutz. Bereits TLS-Verbindungen, PHP-Prozesse und die bcrypt-Verifikation beanspruchen Ressourcen; viele verschiedene Quell-IP-Adressen umgehen ein reines Limit pro IP. Für größere Angriffe muss der Hoster bzw. ein vorgeschalteter Reverse Proxy/WAF Verbindungen und Anfragen begrenzen, bevor PHP erreicht wird. Bei Proxys `REMOTE_ADDR` ausschließlich aus vertrauenswürdiger Infrastruktur ableiten. Das Projekt verändert keine globale Firewall- oder Hosting-Konfiguration.
 
 ## Limits und Statuscodes
 
-Standard: 60 Anfragen je Minute/IP (gleitendes Fenster). Fünf falsche API-Keys innerhalb von 15 Minuten sperren die IP für 15 Minuten. Prüfung erfolgt mit `password_verify`, ohne zeitabhängigen Stringvergleich des Keys. Auch falsche Keys zählen zum Anfragelimit. Statusdateien enthalten nur Zeitstempel und Zähler; Postfachdaten oder Keys werden nicht gespeichert.
+Standard: 60 Anfragen je Minute/IP-Netz (gleitendes Fenster). IPv4 wird pro Adresse gezählt, IPv4-mapped IPv6 entsprechend normalisiert und IPv6 pro /64-Präfix. Fünf falsche API-Keys innerhalb von 15 Minuten sperren das IP-Netz für 15 Minuten. Plausibel formatierte Tokens werden mit `password_verify` geprüft; fehlende oder fehlerhaft formatierte Header werden ohne bcrypt-Aufwand abgelehnt. Auch falsche Keys zählen zum Anfragelimit.
+
+Zusätzlich werden tatsächliche Mail-Anmeldefehler aus IMAP sowie SMTP 534/535 gezählt. Standard: fünf Fehler je IP-Netz innerhalb von 15 Minuten führen zu 15 Minuten Sperre; zehn Fehler für dasselbe Postfach über verschiedene IPs führen zu einer kurzen Sperre von 60 Sekunden. Diese kurze Postfachsperre begrenzt das Risiko, mit einem kompromittierten API-Key legitime Nutzer lange auszusperren. Beide Sperren liefern `mail_auth_rate_limited` (429) mit `Retry-After` und verhindern weitere Mailverbindungen. Bereits laufende Anfragen werden vor dem Netzwerkzugriff reserviert, damit parallele Versuche die Schwelle nicht umgehen. Reservierungen laufen bei abgebrochenen Prozessen nach drei Minuten aus. Erfolgreiche Anfragen entfernen ihre Reservierung, löschen aber nicht die Fehler anderer paralleler Anfragen.
+
+```php
+'failed_mail_logins_before_block' => 5,
+'mail_auth_block_seconds' => 900,
+'failed_mail_logins_per_mailbox' => 10,
+'mailbox_auth_block_seconds' => 60,
+```
+
+Der Statusspeicher ist begrenzt: getrennt für IP-/API-Limits und Mail-Anmeldungen je maximal 64 feste Dateien, maximal 128 aktive Datensätze und 2 MiB pro Datei. Es gibt keine Datei pro IP oder Postfach mehr. Unauthentifizierte Anfragen können den getrennten Mail-Anmeldespeicher nicht füllen. Abgelaufene Datensätze werden vor der Key-Prüfung und auch bei 401/429 entfernt. Auf eine belegte Dateisperre wird höchstens rund 250 ms gewartet; danach folgt 503 mit `Retry-After: 1`, statt PHP-Prozesse unbegrenzt warten zu lassen. Aktive Sperren werden bei Platzmangel nicht verdrängt; neue Identitäten erhalten dann `rate_limit_capacity` (503). Statusdateien enthalten nur Zeitstempel, Reservierungskennungen und Zähler unter gehashten Identitäten; weder Mail-Benutzernamen noch Passwörter oder API-Keys werden gespeichert. Postfachkennungen verwenden HMAC mit dem privaten API-Key-Hash.
+
+Bei einem Update vom früheren Format nach Aktivierung des neuen Codes einmalig mit der passenden PHP-CLI-Version ausführen:
+
+```bash
+php bin/limiter-migrate.php
+```
+
+Das Skript übernimmt noch wirksame IPv4-Limits/Sperren und verschiebt alte Einzeldateien in ein privates Backup neben dem Statusverzeichnis. Für eine abweichende Config wie sonst `IMAPI_CONFIG` setzen. Alte IPv6-Einzeladress-Hashes lassen sich ohne gespeicherte Klartextadressen nicht in /64-Kennungen umrechnen; diese Grenzen beginnen mit dem neuen Format neu. Der neue Betrieb benötigt weder eine Datenbank noch einen Cronjob. Backups gehören nicht zum aktiven Statusspeicher und können nach der üblichen Aufbewahrung manuell entfernt werden.
+
+Diese Maßnahmen begrenzen Anwendungsressourcen und Passwortversuche, ersetzen aber keinen vorgeschalteten DDoS-Schutz. Sperrschwellen des Mailservers müssen mit dem Hoster abgestimmt werden: dessen eigene IP-Sperre kann sonst die gemeinsame Gateway-IP treffen. Bei einem kompromittierten API-Key diesen umgehend rotieren.
 
 | HTTP | Bedeutung |
 | --- | --- |
@@ -160,12 +181,12 @@ Standard: 60 Anfragen je Minute/IP (gleitendes Fenster). Fünf falsche API-Keys 
 | 404 | Ordner, UID oder Anhang fehlt; sent_folder_not_found vor SMTP verhindert den Versand |
 | 405 | Methode außer POST |
 | 409 | Sichere Verschiebung vom Mailserver nicht unterstützt |
-| 413 | Anfrage, Nachricht oder Liste zu groß |
+| 413 | Anfrage oder vollständige Nachricht zu groß; list bleibt als Header-Liste verfügbar |
 | 415 | Content-Type ist nicht application/json |
 | 426 | HTTPS erforderlich |
-| 429 | Rate-Limit oder temporäre IP-Sperre; Retry-After beachten |
+| 429 | API-/Mail-Anmeldelimit, IP-Netz- oder Postfachsperre; Retry-After beachten |
 | 502 | Mailserver-/Transportfehler, u. a. smtp_failed, smtp_status_unknown, folder_create_failed, folder_subscribe_failed, sent_folder_prepare_failed |
-| 503 | Config/Rate-Limit nicht verfügbar oder Mailhost nicht freigegeben |
+| 503 | Config/Rate-Limit nicht verfügbar, Statusspeicher voll oder Mailhost nicht freigegeben |
 
 Standardgrößen: 20 MiB JSON-Anfrage, 12 MiB vollständige MIME-Nachricht, 32 MiB gelesene Nachrichten pro Liste. Webhosting-Limits (`memory_limit`, `post_max_size`, Webserver-Bodylimit) entsprechend einstellen, z. B. 256 MiB PHP-Speicher und 24 MiB `post_max_size`. Base64 und MIME-Decodierung benötigen zusätzlichen Speicher. Vorgeschaltete Serverlimits können eigene Fehlerseiten liefern, bevor PHP ausgeführt wird. Netzwerk-Timeout jeweils 20 Sekunden; Laufzeitlimit des Hosters beachten.
 
@@ -184,7 +205,7 @@ composer test     # Funktions-, Authentifizierungs-, IMAP- und SMTP-Tests; CLI p
 
 `composer check` führt Composer-Validierung, PHPStan und alle PHP-Tests zusammen aus; `composer test` nur die Tests. Die GitHub-Actions-CI führt die Analyse und Tests bei jedem Push und Pull Request unter PHP 8.2, 8.3, 8.4 und 8.5 aus. PHPStan ist ausschließlich eine Entwicklungsabhängigkeit und wird beim Produktionsdeployment mit `composer install --no-dev` nicht installiert. Die Analyse verwendet keine Baseline und keine unterdrückten Fehler. Der lokale Analysecache wird nicht versioniert.
 
-Die Tests prüfen MIME/UTF-8, Anhänge, Bcc, Thread-Header, Eingabevalidierung, Größenlimit, Postfach-Whitelist und Rate-Limit/IP-Sperre. Der Authentifizierungstest fängt die Socket-Funktionen beider Bibliotheken ab und weist null Verbindungsversuche bei fehlenden/falschen Tokens nach; außerdem prüft er Loopback-Pinning mit unveränderter TLS-Prüfung. Die IMAP-/SMTP-Protokolltests verwenden ausschließlich lokale Testserver. Sie prüfen PEEK, explizites Markieren, CREATE/SUBSCRIBE mit vorhandenen und neuen Ordnern, Zeichensatz/Trennzeichen sowie Vorbereitung des konfigurierten Gesendet-Ordners vor SMTP, Versandabbruch bei fehlgeschlagener Vorbereitung, SMTP-Annahme trotz später fehlgeschlagener Ablage, übersprungene Ablage, Ablehnung, teilweise Empfängerannahme und verlorene Bestätigung. Optional prüft `IMAPI_TEST_KEY=… python3 tests/gateway.py` die laufende lokale HTTPS-API ohne echte Postfachzugänge; den Key dabei über eine geschützte Shellvariable setzen. Für den echten Postfach-Smoke-Test die obigen Aufrufe mit einem Testpostfach ausführen; dafür werden keine Zugangsdaten im Projekt hinterlegt.
+Die Tests prüfen MIME/UTF-8, Anhänge, Bcc, Thread-Header, Eingabevalidierung, Größenlimit, Postfach-Whitelist und Rate-Limit/IP-Sperre. Sicherheitsregressionen decken große Mails und ausgeschöpfte Listenbudgets, IPv6-/64-Gruppierung, feste Speichergrenzen, Bereinigung ohne gültigen Key, Migration bestehender Sperren und Mail-Anmeldesperren einschließlich paralleler Reservierungen ab. Der Authentifizierungstest fängt die Socket-Funktionen beider Bibliotheken ab und weist null Verbindungsversuche bei fehlenden/falschen Tokens nach; außerdem prüft er Loopback-Pinning mit unveränderter TLS-Prüfung. Die IMAP-/SMTP-Protokolltests verwenden ausschließlich lokale Testserver. Sie prüfen PEEK, explizites Markieren, CREATE/SUBSCRIBE mit vorhandenen und neuen Ordnern, Zeichensatz/Trennzeichen sowie Vorbereitung des konfigurierten Gesendet-Ordners vor SMTP, Versandabbruch bei fehlgeschlagener Vorbereitung, SMTP-Annahme trotz später fehlgeschlagener Ablage, übersprungene Ablage, Ablehnung, teilweise Empfängerannahme und verlorene Bestätigung. Optional prüft `IMAPI_TEST_KEY=… python3 tests/gateway.py` die laufende lokale HTTPS-API ohne echte Postfachzugänge; den Key dabei über eine geschützte Shellvariable setzen. Für den echten Postfach-Smoke-Test die obigen Aufrufe mit einem Testpostfach ausführen; dafür werden keine Zugangsdaten im Projekt hinterlegt.
 
 Öffentliches Repository vorbereiten: ausschließlich versionierte Dateien hochladen, niemals `private/`, `.dev/`, Header-Dateien oder Maildaten. GitHub CLI nach Anmeldung etwa: `gh repo create imapi --public --source=. --remote=origin --push`. Die Lizenz ist MIT; siehe `LICENSE`.
 

@@ -22,6 +22,9 @@ def request(method='POST', body=None, status=400, code=None, tls=True, **headers
     conn = cls('imapi.test', timeout=10, **({'context': context} if tls else {}))
     base = {'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json',
             'X-Mail-User': 'fixture@sann.gmbh', 'X-Mail-Password': 'fixture-only'}
+    if not tls:
+        # Test HTTPS rejection without ever sending credentials over plaintext HTTP.
+        base = {'Content-Type': 'application/json'}
     base.update(headers)
     data = json.dumps(body) if isinstance(body, dict) else body
     conn.request(method, '/', data, base)

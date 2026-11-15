@@ -127,52 +127,165 @@ function mailTransport(array $c): array {
         'ssl' => ['peer_name' => $host, 'verify_peer' => true, 'verify_peer_name' => true,
             'allow_self_signed' => false, 'SNI_enabled' => true]];
 }
+/** Normalize IPv6 clients to /64; IPv4-mapped IPv6 shares the IPv4 bucket. */
+function clientNetwork(string $ip): string {
+    $packed = @inet_pton($ip);
+    if ($packed === false) { return 'unknown'; }
+    if (strlen($packed) === 16 && substr($packed, 0, 12) === str_repeat("\0", 10) . "\xff\xff") {
+        return (string)inet_ntop(substr($packed, 12));
+    }
+    if (strlen($packed) === 16) { return bin2hex(substr($packed, 0, 8)) . '/64'; }
+    return (string)inet_ntop($packed);
+}
+/** @param array<string, mixed> $c */
+function limiterOption(array $c, string $name, int $default, int $max = 86400): int {
+    $value = $c[$name] ?? $default;
+    if (!is_int($value) || $value < 1 || $value > $max) { fail(503, 'configuration_error', 'Ungültige Limiter-Konfiguration.'); }
+    return $value;
+}
+/**
+ * Fixed 64 shards per scope, at most 128 records and 2 MiB per file. Never
+ * evict live bans to admit a new identity. No filenames depend on raw input.
+ * @param array<string, mixed> $c
+ * @param callable(array<string, mixed>): mixed $update
+ */
+function limiterUpdate(array $c, string $scope, string $key, callable $update): mixed {
+    if (!in_array($scope, ['ip', 'mail'], true)) { fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.'); }
+    $digest = hash('sha256', $key);
+    $shard = sprintf('%02x', hexdec(substr($digest, 0, 2)) % 64);
+    $path = $c['state_dir'] . '/v2-' . $scope . '-' . $shard . '.json';
+    $f = @fopen($path, 'c+');
+    if (!$f) { fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.'); }
+    $deadline = hrtime(true) + 250_000_000;
+    do {
+        $locked = flock($f, LOCK_EX | LOCK_NB);
+        if (!$locked) { usleep(1000); }
+    } while (!$locked && hrtime(true) < $deadline);
+    if (!$locked) {
+        fclose($f); header('Retry-After: 1');
+        fail(503, 'rate_limit_unavailable', 'Rate-Limit derzeit ausgelastet.');
+    }
+    try {
+        $raw = stream_get_contents($f, 2 * 1024 * 1024 + 1);
+        if ($raw === false || strlen($raw) > 2 * 1024 * 1024) { fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.'); }
+        try { $records = $raw === '' ? [] : json_decode($raw, true, 16, JSON_THROW_ON_ERROR); }
+        catch (JsonException) { fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.'); }
+        if (!is_array($records) || count($records) > 128) { fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.'); }
+        $now = time();
+        foreach ($records as $id => $record) {
+            if (!is_array($record) || ($record['expires'] ?? 0) <= $now) { unset($records[$id]); }
+        }
+        if (!isset($records[$key]) && count($records) >= 128) {
+            fail(503, 'rate_limit_capacity', 'Rate-Limit-Kapazität derzeit ausgeschöpft.');
+        }
+        $state = $records[$key] ?? [];
+        $error = null; $result = null;
+        try { $result = $update($state); }
+        catch (Throwable $e) { $error = $e; }
+        $state['expires'] = max($now + 900, ($state['blocked'] ?? 0) + 60);
+        $records[$key] = $state;
+        $json = json_encode($records, JSON_THROW_ON_ERROR);
+        if (strlen($json) > 2 * 1024 * 1024) { fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.'); }
+        rewind($f);
+        if (!ftruncate($f, 0) || fwrite($f, $json) !== strlen($json) || !fflush($f)) {
+            fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.');
+        }
+        if ($error !== null) { throw $error; }
+        return $result;
+    } finally { flock($f, LOCK_UN); fclose($f); }
+}
+function throttled(int $seconds, string $code = 'rate_limited'): never {
+    header('Retry-After: ' . max(1, $seconds));
+    fail(429, $code, 'Zu viele Anfragen oder fehlgeschlagene Anmeldungen. Bitte später erneut versuchen.');
+}
 /**
  * @param array<string, mixed> $c
  * @param array<string, mixed> $server
  */
 function authenticate(array $c, array $server): void {
-    $now = time();
-    $path = $c['state_dir'] . '/' . hash('sha256', $server['REMOTE_ADDR'] ?? 'unknown') . '.json';
-    $f = @fopen($path, 'c+');
-    if (!$f || !flock($f, LOCK_EX)) { fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.'); }
-    try {
-        $raw = stream_get_contents($f);
-        $state = $raw === '' ? [] : json_decode($raw, true, 16, JSON_THROW_ON_ERROR);
+    $keyId = hash('sha256', clientNetwork($server['REMOTE_ADDR'] ?? 'unknown'));
+    $valid = limiterUpdate($c, 'ip', $keyId, static function (array &$state) use ($c, $server): bool {
+        $now = time();
         $requests = array_values(array_filter($state['requests'] ?? [], fn($t) => $t > $now - 60));
         $failures = array_values(array_filter($state['failures'] ?? [], fn($t) => $t > $now - 900));
         $blocked = $state['blocked'] ?? 0;
-        if ($blocked > $now || count($requests) >= $c['requests_per_minute']) {
-            header('Retry-After: ' . max(1, $blocked > $now ? $blocked - $now : $requests[0] + 60 - $now));
-            fail(429, 'rate_limited', 'Zu viele Anfragen. Bitte später erneut versuchen.');
-        }
+        if ($blocked > $now) { throttled($blocked - $now); }
+        if (count($requests) >= limiterOption($c, 'requests_per_minute', 60, 1000)) { throttled($requests[0] + 60 - $now); }
         $requests[] = $now;
         $auth = $server['HTTP_AUTHORIZATION'] ?? '';
-        $key = preg_match('/^Bearer ([A-Za-z0-9_-]{32,256})$/D', $auth, $m) ? $m[1] : '';
-        $valid = password_verify($key, $c['api_key_hash']);
+        // Reject malformed credentials cheaply; generated keys are 64 hex chars.
+        // Keep the documented token alphabet for existing manually provisioned keys.
+        $wellFormed = preg_match('/^Bearer ([A-Za-z0-9_-]{32,72})$/D', $auth, $m) === 1;
+        $valid = $wellFormed && password_verify($m[1], $c['api_key_hash']);
         if (!$valid) {
             $failures[] = $now;
-            if (count($failures) >= $c['failed_keys_before_block']) {
-                $blocked = $now + $c['block_seconds'];
+            if (count($failures) >= limiterOption($c, 'failed_keys_before_block', 5, 100)) {
+                $blocked = $now + limiterOption($c, 'block_seconds', 900);
                 $failures = [];
             }
         }
-        $json = json_encode(['requests' => $requests, 'failures' => $failures, 'blocked' => $blocked], JSON_THROW_ON_ERROR);
-        rewind($f);
-        if (!ftruncate($f, 0) || fwrite($f, $json) !== strlen($json) || !fflush($f)) {
-            fail(503, 'rate_limit_unavailable', 'Rate-Limit nicht verfügbar.');
+        $state = ['requests' => $requests, 'failures' => $failures, 'blocked' => $blocked];
+        return $valid;
+    });
+    if (!$valid) { header('WWW-Authenticate: Bearer'); fail(401, 'unauthorized', 'Ungültiger API-Key.'); }
+}
+/**
+ * @param array<string, mixed> $c
+ * @param callable(): array<string, mixed> $operation
+ * @return array<string, mixed>
+ */
+function mailAuthentication(array $c, string $user, callable $operation): array {
+    $ip = hash('sha256', clientNetwork($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
+    $mailbox = hash_hmac('sha256', strtolower($user), $c['api_key_hash']);
+    $guards = [
+        ['key' => 'ip:' . $ip, 'limit' => limiterOption($c, 'failed_mail_logins_before_block', 5, 100),
+            'block' => limiterOption($c, 'mail_auth_block_seconds', 900)],
+        ['key' => 'mailbox:' . $mailbox, 'limit' => limiterOption($c, 'failed_mail_logins_per_mailbox', 10, 100),
+            'block' => limiterOption($c, 'mailbox_auth_block_seconds', 60)],
+    ];
+    $lease = bin2hex(random_bytes(16));
+    $reserved = []; $failed = false; $result = null;
+    try {
+        foreach ($guards as $guard) {
+            limiterUpdate($c, 'mail', $guard['key'], static function (array &$s) use ($guard, $lease): void {
+                $now = time();
+                $s['failures'] = array_values(array_filter($s['failures'] ?? [], fn($t) => $t > $now - 900));
+                $s['pending'] = array_filter($s['pending'] ?? [], fn($t) => $t > $now);
+                if (($s['blocked'] ?? 0) > $now) { throttled($s['blocked'] - $now, 'mail_auth_rate_limited'); }
+                if (count($s['failures']) + count($s['pending']) >= $guard['limit']) {
+                    throttled(1, 'mail_auth_rate_limited');
+                }
+                // Count in-flight attempts before releasing the lock to stop parallel guessing.
+                $s['pending'][$lease] = $now + 180;
+            });
+            $reserved[] = $guard;
         }
-        if (!$valid) { header('WWW-Authenticate: Bearer'); fail(401, 'unauthorized', 'Ungültiger API-Key.'); }
-    } finally { flock($f, LOCK_UN); fclose($f); }
-    // Bounded opportunistic cleanup; only limiter-owned files, never request data.
-    if (random_int(1, 100) === 1) {
-        $checked = 0;
-        foreach (new DirectoryIterator($c['state_dir']) as $entry) {
-            if (++$checked > 1000) { break; }
-            if ($entry->isFile() && preg_match('/^[a-f0-9]{64}\.json$/D', $entry->getFilename())
-                && $entry->getMTime() < $now - max(3600, $c['block_seconds'] + 900)) { @unlink($entry->getPathname()); }
+        try { $result = $operation(); }
+        catch (\Webklex\PHPIMAP\Exceptions\AuthFailedException $e) { $failed = true; throw $e; }
+        catch (ApiError $e) { $failed = $e->errorCode === 'mail_auth_failed'; throw $e; }
+    } finally {
+        foreach ($reserved as $guard) {
+            try {
+                limiterUpdate($c, 'mail', $guard['key'], static function (array &$s) use ($guard, $lease, $failed): void {
+                    unset($s['pending'][$lease]);
+                    if ($failed) {
+                        $now = time();
+                        $s['failures'] = array_values(array_filter($s['failures'] ?? [], fn($t) => $t > $now - 900));
+                        $s['failures'][] = $now;
+                        if (count($s['failures']) >= $guard['limit']) {
+                            $s['blocked'] = $now + $guard['block'];
+                            $s['failures'] = [];
+                        }
+                    }
+                });
+            } catch (Throwable $e) {
+                // Never turn confirmed SMTP acceptance into a retryable failed send.
+                if (is_array($result) && ($result['sent'] ?? false) === true) { $result['security_warning'] = 'Rate-Limit-Status konnte nicht aktualisiert werden.'; }
+                else { throw $e; }
+            }
         }
     }
+    return $result;
 }
 /** @return array<string, mixed> */
 function imapOptions(): array {
@@ -352,7 +465,7 @@ function attachments(Message $m, bool $content = false): array {
     return $out;
 }
 /** @return array<string, mixed> */
-function summary(Message $m): array {
+function summary(Message $m, bool $bodyLoaded = true): array {
     $addresses = static function ($attr): array {
         $out = [];
         foreach ($attr->all() as $a) { $out[] = ['email' => $a->mail, 'name' => $a->personal ?? '']; }
@@ -362,7 +475,33 @@ function summary(Message $m): array {
         'from' => $addresses($m->getFrom()), 'to' => $addresses($m->getTo()), 'cc' => $addresses($m->getCc()),
         'subject' => (string)$m->getSubject(), 'seen' => $m->hasFlag('Seen'),
         'flagged' => $m->hasFlag('Flagged'), 'size' => (int)$m->getSize(),
-        'attachment_count' => $m->getAttachments()->count()];
+        'attachment_count' => $bodyLoaded ? $m->getAttachments()->count() : null];
+}
+/**
+ * @param array<string, mixed> $c
+ * @return array{messages: list<array<string, mixed>>, truncated: bool}
+ */
+function listMessages(Client $client, Folder $folder, int $limit, string $since, bool $unseen, array $c): array {
+    $query = $folder->query()->all();
+    if ($since !== '') { $query->since($since); }
+    if ($unseen) { $query->unseen(); }
+    $uids = $query->search()->all();
+    rsort($uids, SORT_NUMERIC);
+    $uids = array_slice($uids, 0, $limit);
+    $out = []; $total = 0; $truncated = false;
+    foreach ($uids as $uid) {
+        $m = loadMessage($client, $folder, (int)$uid, $c['max_message_bytes'], false);
+        $size = (int)$m->getSize();
+        $tooLarge = $size > $c['max_message_bytes'];
+        $bodyLoaded = !$tooLarge && $size <= $c['max_list_bytes'] - $total;
+        if ($bodyLoaded) {
+            $m = loadMessage($client, $folder, (int)$uid, $c['max_message_bytes'], true);
+            $total += $size;
+        } else { $truncated = true; }
+        $out[] = summary($m, $bodyLoaded) + ['too_large' => $tooLarge, 'body_loaded' => $bodyLoaded];
+    }
+    // Size limits restrict MIME enrichment, never the visibility of subsequent headers.
+    return ['messages' => $out, 'truncated' => $truncated];
 }
 /**
  * @param array<string, mixed> $p
@@ -494,24 +633,7 @@ function dispatch(array $p, array $c, string $user, #[SensitiveParameter] string
         if ($action === 'create_folder') { return createMailFolder($client, $name); }
         $folder = getFolder($client, $name);
         if ($action === 'list') {
-            $query = $folder->query()->all();
-            if ($since !== '') { $query->since($since); }
-            if ($unseen) { $query->unseen(); }
-            $uids = $query->search()->all();
-            rsort($uids, SORT_NUMERIC);
-            $uids = array_slice($uids, 0, $limit);
-            $out = []; $total = 0;
-            foreach ($uids as $messageUid) {
-                $m = loadMessage($client, $folder, (int)$messageUid, $c['max_message_bytes'], false);
-                $size = (int)$m->getSize();
-                $total += $size;
-                if ($size > $c['max_message_bytes'] || $total > $c['max_list_bytes']) {
-                    fail(413, 'list_too_large', 'Nachrichten überschreiten das Leselimit; limit reduzieren oder since nutzen.');
-                }
-                $m = loadMessage($client, $folder, (int)$messageUid, $c['max_message_bytes'], true);
-                $out[] = summary($m);
-            }
-            return ['folder' => $name, 'messages' => $out];
+            return ['folder' => $name] + listMessages($client, $folder, $limit, $since, $unseen, $c);
         }
         $m = loadMessage($client, $folder, $uid, $c['max_message_bytes'], $action !== 'flag');
         if ($action === 'get') {
@@ -571,7 +693,7 @@ function main(): void {
         $password = $_SERVER['HTTP_X_MAIL_PASSWORD'] ?? '';
         if (strlen($user) > 254 || !allowedMailbox($user, $c['allowed_mailboxes'])) { fail(403, 'mailbox_forbidden', 'Postfach nicht erlaubt.'); }
         if ($password === '' || strlen($password) > 4096 || preg_match('/[\r\n\x00]/', $password)) { fail(403, 'mail_auth_failed', 'Mail-Anmeldung fehlgeschlagen.'); }
-        respond(200, ['ok' => true, 'data' => dispatch($p, $c, $user, $password)]);
+        respond(200, ['ok' => true, 'data' => mailAuthentication($c, $user, static fn() => dispatch($p, $c, $user, $password))]);
     } catch (ApiError $e) { respond($e->status, ['ok' => false, 'error' => ['code' => $e->errorCode, 'message' => $e->getMessage()]]); }
     catch (\Webklex\PHPIMAP\Exceptions\AuthFailedException) { respond(403, ['ok' => false, 'error' => ['code' => 'mail_auth_failed', 'message' => 'Mail-Anmeldung fehlgeschlagen.']]); }
     catch (\Webklex\PHPIMAP\Exceptions\MessageNotFoundException) { respond(404, ['ok' => false, 'error' => ['code' => 'message_not_found', 'message' => 'Nachricht nicht gefunden.']]); }

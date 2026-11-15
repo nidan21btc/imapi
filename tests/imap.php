@@ -23,6 +23,7 @@ if ($pid === 0) {
     $peekReads = 0;
     $createdFolders = [];
     $subscriptions = 0;
+    $listSearches = 0;
     while (($line = fgets($peer)) !== false) {
         if (!preg_match('/^(\S+) (.+)\r\n$/', $line, $match)) { exit(3); }
         [$unused, $tag, $command] = $match;
@@ -43,13 +44,20 @@ if ($pid === 0) {
         } elseif (str_starts_with($command, 'SUBSCRIBE ')) { $subscriptions++; }
         elseif (str_starts_with($command, 'SELECT ')) {
             fwrite($peer, "* FLAGS (\\Seen \\Flagged)\r\n* 1 EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 1]\r\n* OK [UIDNEXT 43]\r\n");
+        } elseif (str_starts_with($command, 'UID SEARCH ')) {
+            $listSearches++;
+            fwrite($peer, "* SEARCH 42 43 44\r\n");
         } elseif (str_starts_with($command, 'UID FETCH ')) {
-            if (str_contains($command, 'RFC822.SIZE')) { fwrite($peer, "* 1 FETCH (UID 42 RFC822.SIZE $size)\r\n"); }
-            elseif (str_contains($command, 'RFC822.HEADER')) { fwrite($peer, '* 1 FETCH (UID 42 RFC822.HEADER {' . strlen($headers) . "}\r\n" . $headers . ")\r\n"); }
+            if (!preg_match('/^UID FETCH (\d+)/', $command, $uidMatch)) { exit(11); }
+            $messageUid = (int)$uidMatch[1];
+            $reportedSize = $listSearches === 0 ? $size : (($listSearches === 1 && $messageUid === 44 ? 13 : 11) * 1024 * 1024);
+            if (str_contains($command, 'RFC822.SIZE')) { fwrite($peer, "* 1 FETCH (UID $messageUid RFC822.SIZE $reportedSize)\r\n"); }
+            elseif (str_contains($command, 'RFC822.HEADER')) { fwrite($peer, '* 1 FETCH (UID ' . $messageUid . ' RFC822.HEADER {' . strlen($headers) . "}\r\n" . $headers . ")\r\n"); }
             elseif (str_contains($command, 'BODY.PEEK[TEXT]')) {
+                if (($listSearches === 1 && $messageUid === 44) || ($listSearches === 2 && $messageUid === 42)) { exit(12); }
                 $peekReads++;
-                fwrite($peer, '* 1 FETCH (UID 42 BODY[TEXT] {' . strlen($body) . "}\r\n" . $body . ")\r\n");
-            } elseif (str_contains($command, 'FLAGS')) { fwrite($peer, '* 1 FETCH (UID 42 FLAGS (' . ($seen ? '\\Seen' : '') . "))\r\n"); }
+                fwrite($peer, '* 1 FETCH (UID ' . $messageUid . ' BODY[TEXT] {' . strlen($body) . "}\r\n" . $body . ")\r\n");
+            } elseif (str_contains($command, 'FLAGS')) { fwrite($peer, '* 1 FETCH (UID ' . $messageUid . ' FLAGS (' . ($seen ? '\\Seen' : '') . "))\r\n"); }
             else { fwrite(STDERR, "Unexpected fetch in fixture.\n"); exit(4); }
         } elseif (str_starts_with($command, 'UID STORE ')) {
             // One explicit marking is allowed only after both PEEK reads.
@@ -58,7 +66,7 @@ if ($pid === 0) {
         } elseif ($command === 'LOGOUT') {
             fwrite($peer, "* BYE closing\r\n$tag OK LOGOUT complete\r\n");
             fclose($peer); fclose($socket);
-            exit($peekReads === 2 && $seen && count($createdFolders) === 3 && $subscriptions === 5 ? 0 : 6);
+            exit($peekReads === 6 && $seen && $listSearches === 2 && count($createdFolders) === 3 && $subscriptions === 5 ? 0 : 6);
         } else { fwrite(STDERR, "Unexpected command in fixture: $command\n"); exit(7); }
         fwrite($peer, "$tag OK completed\r\n");
     }
@@ -94,6 +102,18 @@ try {
     foreach ([['sent_folder' => 'Other'], ['sent_folder' => 'Missing', 'create_sent_folder_if_missing' => false]] as $c) {
         try { prepareSentFolder($client, 'Missing', $c); throw new RuntimeException('Missing folder must stop send preparation.'); }
         catch (ApiError $e) { if ($e->errorCode !== 'sent_folder_not_found') { throw $e; } }
+    }
+    $limits = ['max_message_bytes' => 12 * 1024 * 1024, 'max_list_bytes' => 32 * 1024 * 1024];
+    $large = listMessages($client, $folder, 3, '', false, $limits);
+    if (count($large['messages']) !== 3 || !$large['truncated'] || !$large['messages'][0]['too_large']
+        || $large['messages'][0]['attachment_count'] !== null || $large['messages'][0]['body_loaded']
+        || !$large['messages'][1]['body_loaded'] || $large['messages'][1]['attachment_count'] !== 0) {
+        throw new RuntimeException('Large message hid subsequent headers or invented an attachment count.');
+    }
+    $budget = listMessages($client, $folder, 3, '', false, $limits);
+    if (count($budget['messages']) !== 3 || !$budget['truncated'] || $budget['messages'][2]['body_loaded']
+        || $budget['messages'][2]['attachment_count'] !== null || $budget['messages'][2]['too_large']) {
+        throw new RuntimeException('Combined body budget blocked the mailbox listing.');
     }
     $client->disconnect();
     pcntl_waitpid($pid, $status);
