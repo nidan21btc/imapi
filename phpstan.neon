@@ -1,0 +1,9 @@
+parameters:
+    level: 6
+    phpVersion: 80200
+    paths:
+        - public
+        - bin
+        - tests
+        - config.example.php
+    tmpDir: .phpstan-cache

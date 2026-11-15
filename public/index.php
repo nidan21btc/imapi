@@ -4,6 +4,7 @@ declare(strict_types=1);
 use PHPMailer\PHPMailer\PHPMailer;
 use Webklex\PHPIMAP\Client;
 use Webklex\PHPIMAP\ClientManager;
+use Webklex\PHPIMAP\Connection\Protocols\ImapProtocol;
 use Webklex\PHPIMAP\Folder;
 use Webklex\PHPIMAP\Message;
 
@@ -20,6 +21,7 @@ final class ApiError extends RuntimeException {
 }
 
 function fail(int $status, string $code, string $message): never { throw new ApiError($status, $code, $message); }
+/** @param array<string, mixed> $data */
 function respond(int $status, array $data): void {
     http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
@@ -27,6 +29,7 @@ function respond(int $status, array $data): void {
     header('X-Content-Type-Options: nosniff');
     echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR);
 }
+/** @param array<string, mixed> $p */
 function strparam(array $p, string $key, ?string $default = null, int $max = 1024): string {
     $value = $p[$key] ?? $default;
     if (!is_string($value) || strlen($value) > $max || str_contains($value, "\0")) {
@@ -34,20 +37,24 @@ function strparam(array $p, string $key, ?string $default = null, int $max = 102
     }
     return $value;
 }
+/** @param array<string, mixed> $p */
 function lineparam(array $p, string $key, ?string $default = null, int $max = 1024): string {
     $v = strparam($p, $key, $default, $max);
     if (preg_match('/[\x00-\x1f\x7f]/', $v)) { fail(400, 'invalid_parameter', "Ungültiger Parameter: $key."); }
     return $v;
 }
+/** @param array<string, mixed> $p */
 function boolparam(array $p, string $key, bool $default = false): bool {
     if (array_key_exists($key, $p) && !is_bool($p[$key])) { fail(400, 'invalid_parameter', "Ungültiger Parameter: $key."); }
     return $p[$key] ?? $default;
 }
+/** @param array<string, mixed> $p */
 function intparam(array $p, string $key, int $min, int $max, ?int $default = null): int {
     $v = $p[$key] ?? $default;
     if (!is_int($v) || $v < $min || $v > $max) { fail(400, 'invalid_parameter', "Ungültiger Parameter: $key."); }
     return $v;
 }
+/** @param list<string> $patterns */
 function allowedMailbox(string $user, array $patterns): bool {
     if (!filter_var($user, FILTER_VALIDATE_EMAIL)) { return false; }
     if (!$patterns) { return true; }
@@ -58,6 +65,7 @@ function allowedMailbox(string $user, array $patterns): bool {
     }
     return false;
 }
+/** @return array<string, mixed> */
 function config(): array {
     $path = getenv('IMAPI_CONFIG') ?: __DIR__ . '/../private/config.php';
     $c = is_file($path) ? require $path : null;
@@ -75,6 +83,10 @@ function config(): array {
     }
     return $c;
 }
+/**
+ * @param array<string, mixed> $c
+ * @param array<string, mixed> $server
+ */
 function authenticate(array $c, array $server): void {
     $now = time();
     $path = $c['state_dir'] . '/' . hash('sha256', $server['REMOTE_ADDR'] ?? 'unknown') . '.json';
@@ -118,11 +130,13 @@ function authenticate(array $c, array $server): void {
         }
     }
 }
+/** @return array<string, mixed> */
 function imapOptions(): array {
     return ['options' => ['debug' => false, 'fetch' => \Webklex\PHPIMAP\IMAP::FT_PEEK,
         'fetch_body' => false, 'soft_fail' => false],
         'decoding' => ['options' => ['header' => 'iconv']]];
 }
+/** @param array<string, mixed> $c */
 function connectMailbox(array $c, string $user, #[SensitiveParameter] string $password): Client {
     $client = (new ClientManager(imapOptions()))->make([
         'host' => $c['mail_host'], 'port' => 993, 'encryption' => 'ssl', 'validate_cert' => true,
@@ -137,12 +151,19 @@ function getFolder(Client $client, string $name): Folder {
     return $folder;
 }
 function folderName(Folder $f): string { return mb_convert_encoding($f->path, 'UTF-8', 'UTF7-IMAP'); }
+function imapConnection(Client $client): ImapProtocol {
+    $connection = $client->getConnection();
+    if (!$connection instanceof ImapProtocol) {
+        fail(503, 'configuration_error', 'Webklex-IMAP-Protokollzugriff ist erforderlich.');
+    }
+    return $connection;
+}
 function loadMessage(Client $client, Folder $folder, int $uid, int $maxBytes, bool $body): Message {
     $client->openFolder($folder->path);
     $sizes = $client->getConnection()->sizes([$uid])->validatedData();
     if (!isset($sizes[$uid])) { fail(404, 'message_not_found', 'Nachricht nicht gefunden.'); }
     if ($body && $sizes[$uid] > $maxBytes) { fail(413, 'message_too_large', 'Nachricht überschreitet die Größenbegrenzung.'); }
-    $connection = $client->getConnection();
+    $connection = imapConnection($client);
     $headers = $connection->headers([$uid])->validatedData();
     $flags = $connection->flags([$uid])->validatedData();
     if (!isset($headers[$uid])) { fail(404, 'message_not_found', 'Nachricht nicht gefunden.'); }
@@ -164,6 +185,7 @@ function loadMessage(Client $client, Folder $folder, int $uid, int $maxBytes, bo
     $m->parseRawFlags($flags[$uid] ?? []);
     return $m;
 }
+/** @return list<array{index: int, name: string, type: string, size: int, content_id: string|null, disposition: string|null, content_base64?: string}> */
 function attachments(Message $m, bool $content = false): array {
     $out = [];
     foreach ($m->getAttachments() as $a) {
@@ -175,6 +197,7 @@ function attachments(Message $m, bool $content = false): array {
     }
     return $out;
 }
+/** @return array<string, mixed> */
 function summary(Message $m): array {
     $addresses = static function ($attr): array {
         $out = [];
@@ -187,6 +210,10 @@ function summary(Message $m): array {
         'flagged' => $m->hasFlag('Flagged'), 'size' => (int)$m->getSize(),
         'attachment_count' => $m->getAttachments()->count()];
 }
+/**
+ * @param array<string, mixed> $p
+ * @return list<string>
+ */
 function recipients(array $p, string $field, bool $required = false): array {
     $list = $p[$field] ?? [];
     if (is_string($list)) { $list = [$list]; }
@@ -199,6 +226,10 @@ function recipients(array $p, string $field, bool $required = false): array {
     }
     return $list;
 }
+/**
+ * @param array<string, mixed> $p
+ * @param array<string, mixed> $c
+ */
 function buildMail(array $p, array $c, string $user, #[SensitiveParameter] string $password): PHPMailer {
     $mail = new PHPMailer(true);
     $mail->isSMTP();
@@ -253,6 +284,11 @@ function buildMail(array $p, array $c, string $user, #[SensitiveParameter] strin
     if (strlen($mail->getSentMIMEMessage()) > $c['max_message_bytes']) { fail(413, 'message_too_large', 'Nachricht zu groß.'); }
     return $mail;
 }
+/**
+ * @param array<string, mixed> $p
+ * @param array<string, mixed> $c
+ * @return array<string, mixed>
+ */
 function dispatch(array $p, array $c, string $user, #[SensitiveParameter] string $password): array {
     $action = lineparam($p, 'action', null, 32);
     if (!in_array($action, ['folders', 'list', 'get', 'attachment', 'send', 'flag'], true)) { fail(400, 'invalid_action', 'Unbekannte Aktion.'); }
@@ -343,7 +379,7 @@ function dispatch(array $p, array $c, string $user, #[SensitiveParameter] string
         }
         if ($target) {
             $client->openFolder($folder->path);
-            $connection = $client->getConnection();
+            $connection = imapConnection($client);
             // Do not use Webklex move(): its fallback can expunge unrelated deleted mail.
             $response = $connection->requestAndResponse('UID MOVE', [(string)$uid, $connection->escapeString($target->path)], true);
             if (!$response->boolean()) { fail(502, 'move_failed', 'Verschieben fehlgeschlagen; Zustand vor Wiederholung prüfen.'); }

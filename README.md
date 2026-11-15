@@ -131,12 +131,16 @@ Standardgrößen: 20 MiB JSON-Anfrage, 12 MiB vollständige MIME-Nachricht, 32 M
 Lokaler Apache-VHost: `dev/imapi.test.conf`, ausschließlich `public/` als DocumentRoot. `imapi.test` muss auf dem verwendeten Rechner zum Dev-Server auflösen; `.test` ist keine öffentliche Domain. Das Entwicklungszertifikat liegt unversioniert unter `.dev/`, der private Schlüssel wird nicht veröffentlicht. In der laufenden Umgebung: **https://imapi.test/**. Auf einem anderen Rechner Hosts/DNS-Eintrag und Zertifikatsvertrauen ergänzen.
 
 ```bash
+composer install  # Mit Entwicklungsabhängigkeiten einschließlich PHPStan
 composer validate --strict
 composer check-platform-reqs --no-dev
 php bin/check.php
+composer analyse # PHPStan Level 6 für public/, bin/, tests/ und Beispielconfig
 php tests/run.php
 php tests/imap.php  # Lokaler IMAP-Testserver; CLI pcntl/posix erforderlich
 ```
+
+`composer check` führt Composer-Validierung, PHPStan und beide PHP-Tests zusammen aus; `composer test` nur die Tests. Die GitHub-Actions-CI führt die Analyse und Tests bei jedem Push und Pull Request unter PHP 8.2, 8.3, 8.4 und 8.5 aus. PHPStan ist ausschließlich eine Entwicklungsabhängigkeit und wird beim Produktionsdeployment mit `composer install --no-dev` nicht installiert. Die Analyse verwendet keine Baseline und keine unterdrückten Fehler. Der lokale Analysecache wird nicht versioniert.
 
 Die Tests prüfen MIME/UTF-8, Anhänge, Bcc, Thread-Header, Eingabevalidierung, Größenlimit, Postfach-Whitelist und Rate-Limit/IP-Sperre. Der IMAP-Protokolltest verwendet ausschließlich einen lokalen Testserver und prüft, dass wiederholtes Lesen keine Flag-Schreibbefehle auslöst; erst explizites Markieren setzt Seen. Optional prüft `IMAPI_TEST_KEY=… python3 tests/gateway.py` die laufende lokale HTTPS-API ohne echte Postfachzugänge; den Key dabei über eine geschützte Shellvariable setzen. Für den echten Postfach-Smoke-Test die sechs obigen Aufrufe mit einem Testpostfach ausführen; dafür werden keine Zugangsdaten im Projekt hinterlegt.
 

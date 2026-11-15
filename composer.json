@@ -19,9 +19,17 @@
         "ext-dom": "*",
         "ext-fileinfo": "*"
     },
+    "scripts": {
+        "analyse": "phpstan analyse --no-progress --memory-limit=512M",
+        "test": ["@php tests/run.php", "@php tests/imap.php"],
+        "check": ["@composer validate --strict", "@analyse", "@test"]
+    },
     "config": {
         "platform": {
             "php": "8.2.0"
         }
+    },
+    "require-dev": {
+        "phpstan/phpstan": "^2.3"
     }
 }

@@ -18,6 +18,7 @@ jobs:
       - run: composer install --no-interaction --prefer-dist
       - run: composer validate --strict
       - run: composer check-platform-reqs
+      - run: composer analyse
       - run: php bin/check.php
       - run: php tests/run.php
       - run: php tests/imap.php
